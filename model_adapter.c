@@ -69,7 +69,7 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                     ctx->gw->stream_cb(content, false, ctx->gw->stream_userdata);
                 } else {
                     if (ctx->printed_reasoning_header && !ctx->printed_content_header) {
-                        printf("\n\n\033[1;34m[Belya]\033[0m\n");
+                        printf("\n\n\033[1;34m[Almaz]\033[0m\n");
                         ctx->printed_content_header = true;
                     }
                     printf("%s", content);
@@ -239,8 +239,15 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
         }
 
         if (self->endpoint && strstr(self->endpoint, "openrouter.ai") != NULL) {
-            headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/M4F-S/Belya");
-            headers = curl_slist_append(headers, "X-Title: Belya Agent");
+            headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/M4F-S/Almaz");
+            headers = curl_slist_append(headers, "X-Title: Almaz Organism");
+        }
+
+        if (self->endpoint && strstr(self->endpoint, "opencode.ai") != NULL) {
+            const char *oc_sess = getenv("OPENCODE_SESSION_ID");
+            char sess_hdr[256];
+            snprintf(sess_hdr, sizeof(sess_hdr), "x-opencode-session: %s", (oc_sess && strlen(oc_sess) > 0) ? oc_sess : "almaz-organism-session");
+            headers = curl_slist_append(headers, sess_hdr);
         }
 
         long timeout = self->timeout_sec > 0 ? (long)self->timeout_sec : 60L;
