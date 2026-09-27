@@ -70,7 +70,9 @@ static void test_frontmatter_delimiters(void) {
 
 static void test_path_jailing(void) {
     char root[4096];
-    getcwd(root, sizeof(root));
+    if (!getcwd(root, sizeof(root))) {
+        strcpy(root, ".");
+    }
 
     HOLDOUT_ASSERT(!is_path_jailed("/etc/passwd", root, false), "Jailing blocks /etc/passwd");
     HOLDOUT_ASSERT(!is_path_jailed("../outside_jail", root, false), "Jailing blocks relative traversal outside root");
@@ -158,24 +160,24 @@ static void test_circuit_breaker_resilience(void) {
     // 1st failure
     bool t1 = belya_harness_record_tool_observation(&h, "read_file", "{\"path\":\"nonexistent\"}", "Error: file not found", &alert);
     HOLDOUT_ASSERT(!t1, "1st failure does not trip breaker");
-    if (alert) free(alert); alert = NULL;
+    if (alert) { free(alert); alert = NULL; }
 
     // 2nd failure
     bool t2 = belya_harness_record_tool_observation(&h, "read_file", "{\"path\":\"nonexistent\"}", "Error: file not found", &alert);
     HOLDOUT_ASSERT(!t2, "2nd failure does not trip breaker");
-    if (alert) free(alert); alert = NULL;
+    if (alert) { free(alert); alert = NULL; }
 
     // 3rd failure (trips)
     bool t3 = belya_harness_record_tool_observation(&h, "read_file", "{\"path\":\"nonexistent\"}", "Error: file not found", &alert);
     HOLDOUT_ASSERT(t3, "3rd consecutive failure trips circuit breaker");
     HOLDOUT_ASSERT(alert != NULL, "Circuit breaker produces intervention message");
-    if (alert) free(alert); alert = NULL;
+    if (alert) { free(alert); alert = NULL; }
 
     // Succeeded tool resets breaker
     bool t4 = belya_harness_record_tool_observation(&h, "read_file", "{\"path\":\"real.c\"}", "int main() {}", &alert);
     HOLDOUT_ASSERT(!t4, "Success does not trip breaker");
     HOLDOUT_ASSERT(h.consecutive_tool_failures == 0, "Breaker consecutive failures reset to 0 on success");
-    if (alert) free(alert); alert = NULL;
+    if (alert) { free(alert); alert = NULL; }
 }
 
 int main(void) {
