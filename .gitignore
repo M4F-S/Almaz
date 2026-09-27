@@ -2,11 +2,17 @@
 *.o
 belya
 almaz
+almaz-watchdog
 belya_test
+almaz_test
+almaz_holdout
 belya_test_asan
+almaz_benchmark
 belya_benchmark
 test_runner
 bench_*
+.almaz_history
+almaz_crashes.log
 
 # SQLite Databases & Test Artifacts
 *.sqlite

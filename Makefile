@@ -4,18 +4,26 @@ LIBS = -lcurl -lsqlite3
 
 SRCS = linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c main.c
 OBJS = $(SRCS:.c=.o)
-TARGET = belya
+TARGET = almaz
 
 TEST_SRCS = linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c test_suite.c
-TEST_TARGET = belya_test
+TEST_TARGET = almaz_test
+
+HOLDOUT_SRCS = linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c test_holdout.c
+HOLDOUT_TARGET = almaz_holdout
 
 BENCHMARK_SRCS = linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c benchmark_runner.c
-BENCHMARK_TARGET = belya_benchmark
+BENCHMARK_TARGET = almaz_benchmark
 
-all: $(TARGET)
+WATCHDOG_TARGET = almaz-watchdog
+
+all: $(TARGET) $(WATCHDOG_TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
+
+$(WATCHDOG_TARGET): watchdog.c
+	$(CC) $(CFLAGS) -o $@ watchdog.c -lcurl
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -26,6 +34,12 @@ test: $(TEST_TARGET)
 $(TEST_TARGET): $(TEST_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SRCS) $(LIBS)
 
+holdout: $(HOLDOUT_TARGET)
+	./$(HOLDOUT_TARGET)
+
+$(HOLDOUT_TARGET): $(HOLDOUT_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(HOLDOUT_SRCS) $(LIBS)
+
 benchmark: $(BENCHMARK_TARGET) $(TARGET)
 	./$(BENCHMARK_TARGET)
 
@@ -33,7 +47,6 @@ $(BENCHMARK_TARGET): $(BENCHMARK_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(BENCHMARK_SRCS) $(LIBS)
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_TARGET) $(BENCHMARK_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history 
+	rm -f $(OBJS) $(TARGET) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) $(WATCHDOG_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
 
-.PHONY: all test benchmark clean
-
+.PHONY: all test holdout benchmark clean

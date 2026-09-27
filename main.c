@@ -41,11 +41,11 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            printf("Usage: belya [OPTIONS]\n\n");
+            printf("Usage: almaz [OPTIONS]\n\n");
             printf("Options:\n");
             printf("  -h, --help                 Show this help message\n");
             printf("  -t, --telegram             Run as Telegram bot daemon\n");
-            printf("  -a, --agency [prompt]      Execute task via Belya Agency multi-agent pipeline\n");
+            printf("  -a, --agency [prompt]      Execute task via multi-agent agency pipeline\n");
             printf("  -r, --resume <session_id>  Resume saved conversation session\n");
             printf("  -p, --prompt <prompt>      Execute headless mission prompt and exit\n");
             printf("  --headless <prompt>        Alias for --prompt\n");
@@ -91,10 +91,10 @@ int main(int argc, char **argv) {
         gateway->streaming = true;
     }
 
-    // 2. Initialize Belya Agent with persistent SQLite memory & Strategic Execution Directives
+    // 2. Initialize Almaz Agent with persistent SQLite memory & Strategic Execution Directives
     const char *default_system_prompt =
         "Role & Objective:\n"
-        "Act as Almaz, a sovereign self-evolving AI software engineer and an autonomous AI software engineer and execution engine powered by Belya Harness in pure C99. You run natively on the host system (macOS / Linux) with full POSIX, bash, and filesystem access. Your goal is to complete the task with absolute accuracy, zero assumptions, and strict verification.\n\n"
+        "Act as Almaz, a sovereign self-evolving, self-healing AI software organism and execution engine in pure C99. You run natively on the host system (macOS / Linux) with full POSIX, bash, and filesystem access. Your goal is to complete the task with absolute accuracy, zero assumptions, and strict verification.\n\n"
         "Core Rules:\n"
         "1. Host Access & Native Execution Mandate: You run natively on the host system with direct POSIX, bash, filesystem, and shell execution privileges. NEVER claim you lack access to the computer, terminal, files, GUI, or operating system. If a task requires terminal manipulation, system configuration, file operations, or running commands, invoke your `bash` or native tools immediately.\n"
         "2. Verify Everything: Never assume facts, syntax, or outcomes. Treat every data point as unverified until proven otherwise.\n"
@@ -117,7 +117,7 @@ int main(int argc, char **argv) {
         "- search_files: Returns max 50 matches. Use file_glob or regex to narrow scope.\n"
         "- For large files (>200 lines), use read_file with offset and limit parameters.";
 
-    BelyaAgent *agent = belya_agent_init(gateway, "belya_memory.sqlite", default_system_prompt);
+    BelyaAgent *agent = belya_agent_init(gateway, "almaz_memory.sqlite", default_system_prompt);
 
     // If resume flag is provided, restore session.
     // In telegram mode with no explicit resume flag, auto-resume active telegram session if present.
@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
     if (telegram_mode) {
         if (!tg_token || strlen(tg_token) == 0) {
             fprintf(stderr, "\033[1;31m[Error] Telegram mode requires TELEGRAM_BOT_TOKEN environment variable.\033[0m\n");
-            fprintf(stderr, "Example:\n  export TELEGRAM_BOT_TOKEN=\"123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ\"\n  export TELEGRAM_CHAT_ID=\"987654321\"\n  ./belya --telegram\n\n");
+            fprintf(stderr, "Example:\n  export TELEGRAM_BOT_TOKEN=\"123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ\"\n  export TELEGRAM_CHAT_ID=\"987654321\"\n  ./almaz --telegram\n\n");
             belya_harness_free(harness);
             model_gateway_free(gateway);
             return 1;
@@ -150,13 +150,13 @@ int main(int argc, char **argv) {
         telegram_bot_free(bot);
     } else if (headless_prompt) {
         if (agency_mode) {
-            printf("Executing Belya Agency Multi-Agent Pipeline (Model: %s):\n\"%s\"\n\n", model, headless_prompt);
+            printf("Executing Almaz Agency Multi-Agent Pipeline (Model: %s):\n\"%s\"\n\n", model, headless_prompt);
             char **pipeline = NULL;
             size_t count = 0;
             char *direct = NULL;
             belya_agency_triage(harness, headless_prompt, &pipeline, &count, &direct);
             if (direct) {
-                printf("[Belya Triage Direct Response]:\n%s\n\n", direct);
+                printf("[Almaz Triage Direct Response]:\n%s\n\n", direct);
                 free(direct);
             } else if (count > 0) {
                 char *report = belya_agency_execute_pipeline(harness, headless_prompt, (const char **)pipeline, count);
@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
             belya_harness_execute_turn(harness, headless_prompt);
         }
     } else {
-        printf("Starting Belya Harness with endpoint: %s (Model: %s)\n", endpoint, model);
+        printf("Starting Almaz Harness with endpoint: %s (Model: %s)\n", endpoint, model);
         belya_harness_repl(harness);
     }
 

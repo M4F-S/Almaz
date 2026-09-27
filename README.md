@@ -1,15 +1,15 @@
-# Belya — Zero-Dependency Autonomous AI Software Engineer & Security Execution Harness (Pure C99)
+# Almaz — Sovereign Self-Evolving, Self-Healing Autonomous AI Organism (Pure C99)
 
-[![Release](https://img.shields.io/badge/Release-v7.0.0-blue.svg)](https://github.com/M4F-S/Belya/releases/tag/v7.0.0)
+[![Release](https://img.shields.io/badge/Release-v0.1.0--organism-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.1.0-organism)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
-[![Tests](https://img.shields.io/badge/Unit_Tests-33%2F33_Passed_(100%25)-brightgreen.svg)]()
-[![Benchmarks](https://img.shields.io/badge/Benchmarks-Exercism_100%25_Pass@1-success.svg)]()
+[![Tests](https://img.shields.io/badge/Unit_Tests-37%2F37_Passed_(100%25)-brightgreen.svg)]()
+[![Holdout](https://img.shields.io/badge/Holdout_Suite-52%2F52_Assertions_(100%25)-brightgreen.svg)]()
 [![Tools](https://img.shields.io/badge/Native_Tools-18_Tools-informational.svg)]()
+[![Watchdog](https://img.shields.io/badge/Watchdog-VIGIL_Self--Healing-success.svg)]()
 [![Memory](https://img.shields.io/badge/Memory_Footprint-<3.5MB_Idle-purple.svg)]()
-[![Binary](https://img.shields.io/badge/Binary_Size-<220KB-informational.svg)]()
 
-A high-performance, zero-dependency autonomous AI agent and security execution harness implemented in pure C99. Designed for sub-millisecond execution, complete local privacy, low-level POSIX execution safety, Model Context Protocol (MCP) tool extensibility, dynamic self-tooling, multi-session checkpointing, pre-flight compiler auto-healing, Gomaa memory scoping, tool-call scavenging, 3-zone prompt caching, procedural skills curation, instant Git rollback, historical conversation search, multi-method REST API requests, persistent HTTP keep-alive connection reuse, forced text synthesis, real-time context pruning, workspace path jailing, file-first skills catalog, composable rule packs, troubleshooting resolvers, **Belya Agency sovereign multi-agent orchestration**, and 24/7 VPS Telegram Bot remote control.
+Almaz is a sovereign self-evolving, self-healing autonomous AI organism implemented in pure C99 with a POSIX sibling watchdog (`almaz-watchdog`), SARSI persistent self-model introspection, VIGIL emotional appraisal state machine (`confidence`/`frustration`), KnowSelf situational memory gating, hidden holdout regression safety (AIDE² protocol), and Darwinian AST self-evolution.
 
 ---
 

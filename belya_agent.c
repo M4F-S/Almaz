@@ -62,6 +62,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     agent->auto_save_interval = 5;
     agent->turn_count = 0;
     agent->turns_since_save = 0;
+    agent->confidence = 0.70f;
+    agent->frustration = 0.00f;
 
     // Configurable compaction thresholds from environment
     const char *comp_pct_env = getenv("COMPACTION_PERCENT");
@@ -133,8 +135,31 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
             "  max_turns INTEGER DEFAULT 5,"
             "  instructions TEXT NOT NULL,"
             "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE TABLE IF NOT EXISTS self_model ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  version INTEGER NOT NULL,"
+            "  capabilities TEXT,"
+            "  weaknesses TEXT,"
+            "  performance_stats TEXT,"
+            "  active INTEGER DEFAULT 1,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
             ");";
         sqlite3_exec(agent->db, schema_sql, 0, 0, 0);
+
+        sqlite3_stmt *chk_stmt = NULL;
+        if (sqlite3_prepare_v2(agent->db, "SELECT COUNT(*) FROM self_model;", -1, &chk_stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(chk_stmt) == SQLITE_ROW && sqlite3_column_int(chk_stmt, 0) == 0) {
+                sqlite3_exec(agent->db,
+                    "INSERT INTO self_model (version, capabilities, weaknesses, performance_stats, active) VALUES ("
+                    "1, "
+                    "'[\"pure C99 systems programming\", \"zero memory leak compliance\", \"POSIX shell operations\", \"deterministic code verification\", \"Jev TypeSafe AI sub-200ms risk gating\"]', "
+                    "'[\"unbounded speculative edits without read_file\", \"deep conversational drift\"]', "
+                    "'{\"turns\": 0, \"success_rate\": 1.0, \"consecutive_crashes\": 0}', "
+                    "1);", 0, 0, 0);
+            }
+            sqlite3_finalize(chk_stmt);
+        }
 
         // Safe column migration for existing databases
         const char *migrations[] = {
@@ -2066,6 +2091,67 @@ void belya_agent_set_auto_save_interval(BelyaAgent *agent, size_t interval) {
     if (agent) {
         agent->auto_save_interval = interval;
         agent->turns_since_save = 0;
+    }
+}
+
+char *almaz_agent_get_self_model(BelyaAgent *agent) {
+    if (!agent || !agent->db) return NULL;
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT version, capabilities, weaknesses, performance_stats FROM self_model WHERE active = 1 ORDER BY id DESC LIMIT 1;";
+    if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return NULL;
+    }
+    char *result = NULL;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        int version = sqlite3_column_int(stmt, 0);
+        const char *cap = (const char *)sqlite3_column_text(stmt, 1);
+        const char *weak = (const char *)sqlite3_column_text(stmt, 2);
+        const char *stats = (const char *)sqlite3_column_text(stmt, 3);
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "Self-Model (v%d):\n- Capabilities: %s\n- Weaknesses: %s\n- Performance: %s\n- Appraisal: confidence=%.2f, frustration=%.2f",
+                        version, cap ? cap : "N/A", weak ? weak : "N/A", stats ? stats : "N/A",
+                        agent->confidence, agent->frustration);
+        result = strdup(ds.data);
+        dyn_str_free(&ds);
+    }
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+bool almaz_agent_update_self_model(BelyaAgent *agent, const char *capabilities, const char *weaknesses, const char *performance_stats) {
+    if (!agent || !agent->db) return false;
+    sqlite3_stmt *stmt = NULL;
+    int next_version = 1;
+    const char *vsql = "SELECT COALESCE(MAX(version), 0) + 1 FROM self_model;";
+    if (sqlite3_prepare_v2(agent->db, vsql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            next_version = sqlite3_column_int(stmt, 0);
+        }
+        sqlite3_finalize(stmt);
+    }
+    sqlite3_exec(agent->db, "UPDATE self_model SET active = 0 WHERE active = 1;", 0, 0, 0);
+
+    const char *ins = "INSERT INTO self_model (version, capabilities, weaknesses, performance_stats, active) VALUES (?, ?, ?, ?, 1);";
+    if (sqlite3_prepare_v2(agent->db, ins, -1, &stmt, NULL) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_int(stmt, 1, next_version);
+    sqlite3_bind_text(stmt, 2, capabilities ? capabilities : "{}", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, weaknesses ? weaknesses : "{}", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, performance_stats ? performance_stats : "{}", -1, SQLITE_STATIC);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+void almaz_agent_record_appraisal(BelyaAgent *agent, bool success) {
+    if (!agent) return;
+    if (success) {
+        agent->confidence = (agent->confidence + 0.05f > 1.0f) ? 1.0f : (agent->confidence + 0.05f);
+        agent->frustration = (agent->frustration - 0.10f < 0.0f) ? 0.0f : (agent->frustration - 0.10f);
+    } else {
+        agent->confidence = (agent->confidence - 0.15f < 0.0f) ? 0.0f : (agent->confidence - 0.15f);
+        agent->frustration = (agent->frustration + 0.20f > 1.0f) ? 1.0f : (agent->frustration + 0.20f);
     }
 }
 

@@ -1,0 +1,20 @@
+[Unit]
+Description=Almaz Sovereign Self-Evolving AI Organism & Telegram Daemon (Pure C99)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/almaz
+EnvironmentFile=/opt/almaz/.env
+ExecStart=/opt/almaz/almaz-watchdog --telegram
+Restart=always
+RestartSec=5s
+
+# Resource and security boundaries
+LimitNOFILE=65536
+KillMode=process
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target

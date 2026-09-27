@@ -1992,8 +1992,82 @@ void test_jev_client(void) {
     printf("  -> Jev TypeSafe AI Integration & Coprocessor Parser PASSED\n");
 }
 
+static void test_self_model_lifecycle(void) {
+    printf("[Test] SARSI Persistent Self-Model (Organism Introspection)...\n");
+    const char *db_name = "test_self_model.sqlite";
+    unlink(db_name);
+
+    BelyaAgent *agent = belya_agent_init(NULL, db_name, "Almaz Organism");
+    assert(agent != NULL);
+
+    char *sm1 = almaz_agent_get_self_model(agent);
+    assert(sm1 != NULL);
+    assert(strstr(sm1, "v1") != NULL);
+    assert(strstr(sm1, "pure C99") != NULL);
+    free(sm1);
+
+    bool ok = almaz_agent_update_self_model(agent, "[\"autonomous C99 self-healing\"]", "[\"latency spikes\"]", "{\"success_rate\": 0.98}");
+    assert(ok);
+
+    char *sm2 = almaz_agent_get_self_model(agent);
+    assert(sm2 != NULL);
+    assert(strstr(sm2, "v2") != NULL);
+    assert(strstr(sm2, "autonomous C99 self-healing") != NULL);
+    free(sm2);
+
+    belya_agent_free(agent);
+    unlink(db_name);
+    printf("  -> SARSI Persistent Self-Model PASSED\n");
+}
+
+static void test_emotional_appraisal(void) {
+    printf("[Test] VIGIL Emotional Appraisal State Machine...\n");
+    BelyaAgent agent;
+    memset(&agent, 0, sizeof(agent));
+    agent.confidence = 0.70f;
+    agent.frustration = 0.00f;
+
+    // Simulate failure
+    almaz_agent_record_appraisal(&agent, false);
+    assert(agent.confidence < 0.70f);
+    assert(agent.frustration > 0.00f);
+
+    // Simulate multiple successes
+    for (int i = 0; i < 10; i++) {
+        almaz_agent_record_appraisal(&agent, true);
+    }
+    assert(agent.confidence == 1.0f);
+    assert(agent.frustration == 0.0f);
+
+    // Simulate multiple failures until saturation
+    for (int i = 0; i < 15; i++) {
+        almaz_agent_record_appraisal(&agent, false);
+    }
+    assert(agent.confidence == 0.0f);
+    assert(agent.frustration == 1.0f);
+
+    printf("  -> VIGIL Emotional Appraisal State Machine PASSED\n");
+}
+
+static void test_knowself_memory_gating(void) {
+    printf("[Test] KnowSelf Situational Memory Gating...\n");
+    assert(almaz_should_retrieve_memory("Do you remember our discussion yesterday?"));
+    assert(almaz_should_retrieve_memory("What was the previous goal?"));
+    assert(almaz_should_retrieve_memory("What is your current emotional appraisal status?"));
+    assert(almaz_should_retrieve_memory("Explain the project architecture and evolution"));
+
+    assert(!almaz_should_retrieve_memory("hello"));
+    assert(!almaz_should_retrieve_memory("good morning"));
+    assert(!almaz_should_retrieve_memory("gcc -O2 main.c"));
+    assert(!almaz_should_retrieve_memory("cat file.txt"));
+    assert(!almaz_should_retrieve_memory(""));
+    assert(!almaz_should_retrieve_memory(NULL));
+
+    printf("  -> KnowSelf Situational Memory Gating PASSED\n");
+}
+
 int main(void) {
-    printf("\n================ Running BelyaHarness & BelyaAgent Super Strict Test Suite ================\n");
+    printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
     test_minijson();
     test_token_estimator();
@@ -2028,6 +2102,9 @@ int main(void) {
     test_troubleshooting_pattern_resolver();
     test_belya_agency_architecture();
     test_jev_client();
-    printf("================ All Tests Passed Successfully (34/34 - 100%%) ================\n\n");
+    test_self_model_lifecycle();
+    test_emotional_appraisal();
+    test_knowself_memory_gating();
+    printf("================ All Tests Passed Successfully (37/37 - 100%%) ================\n\n");
     return 0;
 }

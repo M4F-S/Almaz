@@ -69,6 +69,7 @@ bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_nam
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write);
 bool is_path_safe(const char *path);
 char *belya_troubleshooting_resolve(const char *error_trace, const char *troubleshooting_path);
+bool almaz_should_retrieve_memory(const char *user_input);
 void belya_harness_free(BelyaHarness *h);
 
 extern const char *g_active_custom_script_path;

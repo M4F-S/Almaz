@@ -2336,10 +2336,10 @@ static void harness_completion_hook(const char *buf, linenoiseCompletions *lc) {
 
 void belya_harness_repl(BelyaHarness *h) {
     linenoiseHistorySetMaxLen(200);
-    linenoiseHistoryLoad(".belya_history");
+    linenoiseHistoryLoad(".almaz_history");
     linenoiseSetCompletionCallback(harness_completion_hook);
 
-    printf("\033[1;32m=== BelyaHarness & BelyaAgent Evolution 4.0 System Activated ===\033[0m\n");
+    printf("\033[1;32m=== Almaz Autonomous Organism Evolution System Activated ===\033[0m\n");
     printf("Model: \033[1;36m%s\033[0m | Endpoint: \033[1;36m%s\033[0m\n", h->agent->gateway->model, h->agent->gateway->endpoint);
     printf("Type \033[1;33m/help\033[0m for commands or \033[1;31mexit\033[0m to terminate.\n\n");
 
@@ -2348,7 +2348,7 @@ void belya_harness_repl(BelyaHarness *h) {
         const char *slash = strrchr(m_disp, '/');
         if (slash) m_disp = slash + 1;
         char prompt[128];
-        snprintf(prompt, sizeof(prompt), "\033[1;35mbelya (\033[1;36m%s\033[1;35m) [%zu msgs]>\033[0m ", m_disp, h->agent->msg_count);
+        snprintf(prompt, sizeof(prompt), "\033[1;35malmaz (\033[1;36m%s\033[1;35m) [%zu msgs]>\033[0m ", m_disp, h->agent->msg_count);
 
         char *line = linenoise(prompt);
         if (!line) break;
@@ -2360,7 +2360,7 @@ void belya_harness_repl(BelyaHarness *h) {
 
         if (strlen(input_buf) > 0) {
             linenoiseHistoryAdd(input_buf);
-            linenoiseHistorySave(".belya_history");
+            linenoiseHistorySave(".almaz_history");
         }
         linenoiseFree(line);
 
@@ -2827,6 +2827,20 @@ bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_nam
     return false;
 }
 
+bool almaz_should_retrieve_memory(const char *user_input) {
+    if (!user_input || *user_input == '\0') return false;
+    static const char *triggers[] = {
+        "remember", "last time", "earlier", "before", "history",
+        "what did", "status", "progress", "previous", "recall",
+        "who are you", "who am i", "project", "architecture", "decision",
+        "goal", "mission", "identity", "evolution", "memory", "appraisal"
+    };
+    for (size_t i = 0; i < sizeof(triggers) / sizeof(triggers[0]); i++) {
+        if (contains_case_insensitive(user_input, triggers[i])) return true;
+    }
+    return false;
+}
+
 void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
     if (!h || !prompt || strlen(prompt) == 0) return;
 
@@ -2835,7 +2849,22 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
     // Ephemeral Git checkpoint before turn starts
     belya_agent_create_checkpoint(h->agent, "pre_turn_auto");
 
-    belya_agent_add_message(h->agent, "user", prompt);
+    // KnowSelf Situational Memory Gate
+    if (almaz_should_retrieve_memory(prompt)) {
+        char *mem = belya_agent_search_memory(h->agent, prompt);
+        if (mem && strlen(mem) > 0) {
+            DynString augmented = dyn_str_new();
+            dyn_str_appendf(&augmented, "%s\n\n[KnowSelf Situational Memory Gate]:\n%s", prompt, mem);
+            belya_agent_add_message(h->agent, "user", augmented.data);
+            dyn_str_free(&augmented);
+            free(mem);
+        } else {
+            if (mem) free(mem);
+            belya_agent_add_message(h->agent, "user", prompt);
+        }
+    } else {
+        belya_agent_add_message(h->agent, "user", prompt);
+    }
 
     // Turn Execution Cycle
     bool turn_running = true;
@@ -2860,7 +2889,7 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
             }
 
             if (!h->agent->gateway->streaming || (resp.content && (strncmp(resp.content, "API Error", 9) == 0 || strncmp(resp.content, "Network Error", 13) == 0 || strncmp(resp.content, "Empty response", 14) == 0 || strncmp(resp.content, "Error:", 6) == 0))) {
-                printf("\n\033[1;34m[Belya]\033[0m\n%s\n\n", resp.content ? resp.content : "");
+                printf("\n\033[1;34m[Almaz]\033[0m\n%s\n\n", resp.content ? resp.content : "");
             } else {
                 printf("\n\n");
             }
@@ -2946,9 +2975,15 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                 bool tripped = belya_harness_record_tool_observation(h, tc->name, tc->arguments_json, observation, &breaker_alert);
                 const char *final_obs = breaker_alert ? breaker_alert : (observation ? observation : "Success");
 
+                bool tool_success = (!tripped && observation && strncmp(observation, "Error:", 6) != 0 && strncmp(observation, "error:", 6) != 0);
+                almaz_agent_record_appraisal(h->agent, tool_success);
+
                 printf("\033[0;32m[Observation Output (%zu bytes)]\033[0m\n", final_obs ? strlen(final_obs) : 0);
                 if (tripped) {
                     printf("\033[1;35m[Metacognitive Circuit Breaker Tripped]: Loop interrupted!\033[0m\n");
+                }
+                if (h->agent->frustration > 0.80f) {
+                    printf("\033[1;35m[Organism Self-Appraisal Alert]: High frustration (%.2f). Strategic pivot suggested.\033[0m\n", h->agent->frustration);
                 }
                 belya_agent_add_tool_result(h->agent, tc->id, tc->name, final_obs);
                 if (breaker_alert) free(breaker_alert);
