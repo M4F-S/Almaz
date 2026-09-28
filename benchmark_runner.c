@@ -65,16 +65,21 @@ static ModelGatewayResponse benchmark_parse_model_json(const char *json_src) {
                 res.has_tool_call = true;
                 res.tool_call_count = tc_arr->u.array.count;
                 res.tool_calls = calloc(res.tool_call_count, sizeof(ModelParsedToolCall));
-                for (size_t i = 0; i < res.tool_call_count; i++) {
-                    JsonValue *tc_item = tc_arr->u.array.items[i];
-                    const char *t_id = json_obj_get_str(tc_item, "id");
-                    JsonValue *fn = json_obj_get(tc_item, "function");
-                    const char *f_name = fn ? json_obj_get_str(fn, "name") : "unknown";
-                    const char *f_args = fn ? json_obj_get_str(fn, "arguments") : "{}";
+                if (res.tool_calls) {
+                    for (size_t i = 0; i < res.tool_call_count; i++) {
+                        JsonValue *tc_item = tc_arr->u.array.items[i];
+                        const char *t_id = json_obj_get_str(tc_item, "id");
+                        JsonValue *fn = json_obj_get(tc_item, "function");
+                        const char *f_name = fn ? json_obj_get_str(fn, "name") : "unknown";
+                        const char *f_args = fn ? json_obj_get_str(fn, "arguments") : "{}";
 
-                    res.tool_calls[i].id = strdup(t_id ? t_id : "call_default");
-                    res.tool_calls[i].name = strdup(f_name ? f_name : "");
-                    res.tool_calls[i].arguments_json = strdup(f_args ? f_args : "{}");
+                        res.tool_calls[i].id = strdup(t_id ? t_id : "call_default");
+                        res.tool_calls[i].name = strdup(f_name ? f_name : "");
+                        res.tool_calls[i].arguments_json = strdup(f_args ? f_args : "{}");
+                    }
+                } else {
+                    res.tool_call_count = 0;
+                    res.has_tool_call = false;
                 }
             }
 

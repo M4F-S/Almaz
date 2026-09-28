@@ -763,6 +763,11 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
 
             size_t search_len = div - p;
             char *search_str = malloc(search_len + 1);
+            if (!search_str) {
+                if (cur_doc != orig) free(cur_doc);
+                free(orig);
+                return strdup("Error: Out of memory allocating search buffer.");
+            }
             memcpy(search_str, p, search_len);
             search_str[search_len] = '\0';
 
@@ -777,6 +782,12 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
 
             size_t rep_len = rep_end - rep_start;
             char *rep_str = malloc(rep_len + 1);
+            if (!rep_str) {
+                free(search_str);
+                if (cur_doc != orig) free(cur_doc);
+                free(orig);
+                return strdup("Error: Out of memory allocating replacement buffer.");
+            }
             memcpy(rep_str, rep_start, rep_len);
             rep_str[rep_len] = '\0';
 
@@ -1368,22 +1379,35 @@ bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***
     if (is_review && !str_contains_ci(p, "fix") && !str_contains_ci(p, "implement")) {
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
+        if (!pipeline) return false;
         pipeline[0] = strdup("reviewer");
     } else if (is_test && !str_contains_ci(p, "fix") && !str_contains_ci(p, "implement")) {
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
+        if (!pipeline) return false;
         pipeline[0] = strdup("tester");
     } else if (is_research && !str_contains_ci(p, "fix") && !str_contains_ci(p, "implement")) {
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
+        if (!pipeline) return false;
         pipeline[0] = strdup("architect");
     } else {
         // Standard Full Engineering Pipeline: Architect -> Builder -> Tester
         count = 3;
         pipeline = malloc(sizeof(char *) * count);
+        if (!pipeline) return false;
         pipeline[0] = strdup("architect");
         pipeline[1] = strdup("builder");
         pipeline[2] = strdup("tester");
+    }
+
+    // Verify all pipeline string allocations
+    for (size_t i = 0; i < count; i++) {
+        if (!pipeline[i]) {
+            for (size_t j = 0; j < i; j++) free(pipeline[j]);
+            free(pipeline);
+            return false;
+        }
     }
 
     *out_pipeline = pipeline;

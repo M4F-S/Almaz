@@ -41,12 +41,17 @@ typedef struct BelyaAgent {
     size_t total_cached_tokens;
     float confidence;           /* Emotional Appraisal: 0.0 to 1.0 (default 0.70) */
     float frustration;          /* Emotional Appraisal: 0.0 to 1.0 (default 0.00) */
+    size_t lifetime_turns;      /* Cumulative lifetime turns across all sessions */
+    size_t lifetime_successes;  /* Successful tool outcomes across lifetime */
+    size_t lifetime_failures;   /* Failed tool outcomes across lifetime */
+    size_t lifetime_tool_calls; /* Total tool calls executed across lifetime */
     char db_path[256];
 } BelyaAgent;
 
 // SARSI Persistent Self-Model (Organism Introspection)
 char *almaz_agent_get_self_model(BelyaAgent *agent);
 bool almaz_agent_update_self_model(BelyaAgent *agent, const char *capabilities, const char *weaknesses, const char *performance_stats);
+bool almaz_agent_sync_self_model(BelyaAgent *agent);
 
 // Emotional Appraisal (VIGIL EmoBank State Machine)
 void almaz_agent_record_appraisal(BelyaAgent *agent, bool success);

@@ -84,8 +84,15 @@ TelegramBot *telegram_bot_init(const char *bot_token, const char *allowed_chat_i
     if (!bot_token || strlen(bot_token) == 0) return NULL;
 
     TelegramBot *bot = calloc(1, sizeof(TelegramBot));
+    if (!bot) return NULL;
     bot->bot_token = strdup(bot_token);
     bot->allowed_chat_id = strdup(allowed_chat_id ? allowed_chat_id : "");
+    if (!bot->bot_token || !bot->allowed_chat_id) {
+        if (bot->bot_token) free(bot->bot_token);
+        if (bot->allowed_chat_id) free(bot->allowed_chat_id);
+        free(bot);
+        return NULL;
+    }
     bot->last_update_id = 0;
     bot->running = false;
     return bot;
@@ -187,6 +194,7 @@ bool telegram_bot_send_chunks(TelegramBot *bot, const char *chat_id, const char 
     while (offset < len) {
         size_t take = (len - offset > CHUNK_SIZE) ? CHUNK_SIZE : (len - offset);
         char *chunk = malloc(take + 1);
+        if (!chunk) break;
         memcpy(chunk, text + offset, take);
         chunk[take] = '\0';
 

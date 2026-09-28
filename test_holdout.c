@@ -71,7 +71,8 @@ static void test_frontmatter_delimiters(void) {
 static void test_path_jailing(void) {
     char root[4096];
     if (!getcwd(root, sizeof(root))) {
-        strcpy(root, ".");
+        strncpy(root, ".", sizeof(root) - 1);
+        root[sizeof(root) - 1] = '\0';
     }
 
     HOLDOUT_ASSERT(!is_path_jailed("/etc/passwd", root, false), "Jailing blocks /etc/passwd");

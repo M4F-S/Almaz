@@ -64,6 +64,10 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     agent->turns_since_save = 0;
     agent->confidence = 0.70f;
     agent->frustration = 0.00f;
+    agent->lifetime_turns = 0;
+    agent->lifetime_successes = 0;
+    agent->lifetime_failures = 0;
+    agent->lifetime_tool_calls = 0;
 
     // Configurable compaction thresholds from environment
     const char *comp_pct_env = getenv("COMPACTION_PERCENT");
@@ -159,6 +163,29 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
                     "1);", 0, 0, 0);
             }
             sqlite3_finalize(chk_stmt);
+        }
+
+        // Restore lifetime proprioceptive metrics from active self-model
+        sqlite3_stmt *ps_stmt = NULL;
+        if (sqlite3_prepare_v2(agent->db, "SELECT performance_stats FROM self_model WHERE active = 1 ORDER BY id DESC LIMIT 1;", -1, &ps_stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(ps_stmt) == SQLITE_ROW) {
+                const char *ps = (const char *)sqlite3_column_text(ps_stmt, 0);
+                if (ps && strlen(ps) > 0) {
+                    JsonValue *jv = json_parse(ps);
+                    if (jv) {
+                        agent->lifetime_turns = (size_t)json_obj_get_num(jv, "turns", 0.0);
+                        agent->lifetime_successes = (size_t)json_obj_get_num(jv, "successes", 0.0);
+                        agent->lifetime_failures = (size_t)json_obj_get_num(jv, "failures", 0.0);
+                        agent->lifetime_tool_calls = (size_t)json_obj_get_num(jv, "tool_calls", 0.0);
+                        double conf_val = json_obj_get_num(jv, "confidence", -1.0);
+                        double frust_val = json_obj_get_num(jv, "frustration", -1.0);
+                        if (conf_val >= 0.0) agent->confidence = (float)conf_val;
+                        if (frust_val >= 0.0) agent->frustration = (float)frust_val;
+                        json_free(jv);
+                    }
+                }
+            }
+            sqlite3_finalize(ps_stmt);
         }
 
         // Safe column migration for existing databases
@@ -665,6 +692,8 @@ bool belya_agent_save_session(BelyaAgent *agent, const char *session_id, const c
     snprintf(save_summary, sizeof(save_summary), "Session '%s' saved (%zu messages)", session_id, agent->msg_count);
     belya_agent_log_timeline(agent, "session_saved", save_summary);
 
+    almaz_agent_sync_self_model(agent);
+
     return true;
 }
 
@@ -681,12 +710,33 @@ bool belya_agent_load_session(BelyaAgent *agent, const char *session_id) {
     size_t count = 0;
     size_t cap = 32;
     BelyaMessage *loaded = calloc(cap, sizeof(BelyaMessage));
+    if (!loaded) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         if (count >= cap) {
             cap *= 2;
             BelyaMessage *more = realloc(loaded, sizeof(BelyaMessage) * cap);
-            if (!more) { sqlite3_finalize(stmt); return false; }
+            if (!more) {
+                for (size_t cl = 0; cl < count; cl++) {
+                    free(loaded[cl].role);
+                    free(loaded[cl].content);
+                    if (loaded[cl].tool_call_id) free(loaded[cl].tool_call_id);
+                    if (loaded[cl].tool_calls) {
+                        for (size_t tk = 0; tk < loaded[cl].tool_call_count; tk++) {
+                            free(loaded[cl].tool_calls[tk].id);
+                            free(loaded[cl].tool_calls[tk].name);
+                            free(loaded[cl].tool_calls[tk].arguments_json);
+                        }
+                        free(loaded[cl].tool_calls);
+                    }
+                }
+                free(loaded);
+                sqlite3_finalize(stmt);
+                return false;
+            }
             loaded = more;
         }
 
@@ -706,14 +756,18 @@ bool belya_agent_load_session(BelyaAgent *agent, const char *session_id) {
             if (tc_arr && tc_arr->type == JSON_ARRAY && tc_arr->u.array.count > 0) {
                 m->tool_call_count = tc_arr->u.array.count;
                 m->tool_calls = calloc(m->tool_call_count, sizeof(ModelParsedToolCall));
-                for (size_t k = 0; k < m->tool_call_count; k++) {
-                    JsonValue *tc_o = tc_arr->u.array.items[k];
-                    const char *tid = json_obj_get_str(tc_o, "id");
-                    const char *tname = json_obj_get_str(tc_o, "name");
-                    const char *targs = json_obj_get_str(tc_o, "arguments");
-                    m->tool_calls[k].id = strdup(tid ? tid : "");
-                    m->tool_calls[k].name = strdup(tname ? tname : "");
-                    m->tool_calls[k].arguments_json = strdup(targs ? targs : "{}");
+                if (m->tool_calls) {
+                    for (size_t k = 0; k < m->tool_call_count; k++) {
+                        JsonValue *tc_o = tc_arr->u.array.items[k];
+                        const char *tid = json_obj_get_str(tc_o, "id");
+                        const char *tname = json_obj_get_str(tc_o, "name");
+                        const char *targs = json_obj_get_str(tc_o, "arguments");
+                        m->tool_calls[k].id = strdup(tid ? tid : "");
+                        m->tool_calls[k].name = strdup(tname ? tname : "");
+                        m->tool_calls[k].arguments_json = strdup(targs ? targs : "{}");
+                    }
+                } else {
+                    m->tool_call_count = 0;
                 }
             }
             if (tc_arr) json_free(tc_arr);
@@ -1838,8 +1892,11 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         size_t est_tok = belya_agent_total_tokens(agent);
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
-        dyn_str_append(&telem_ds, "=== Belya Internal Self-Telemetry & Proprioception ===\n");
-        dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
+        size_t total_tools = agent->lifetime_tool_calls;
+        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+
+        dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
+        dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
             (int)getpid(),
 #if defined(__APPLE__)
             "macOS (Darwin)",
@@ -1850,10 +1907,21 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
 #endif
             belya_get_current_rss_mb(),
             agent->turn_count,
+            agent->lifetime_turns,
             est_tok,
             max_tok,
             tok_pct,
             agent->schema_count);
+        dyn_str_appendf(&telem_ds, "Affective State: Confidence: %.2f | Frustration: %.2f | Lifetime Tool Calls: %zu | Tool Success Rate: %.1f%% (%zu/%zu)\n",
+            (double)agent->confidence,
+            (double)agent->frustration,
+            agent->lifetime_tool_calls,
+            success_rate,
+            agent->lifetime_successes,
+            total_tools);
+        if (agent->frustration >= 0.60f) {
+            dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
+        }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
         dyn_str_free(&telem_ds);
@@ -1966,15 +2034,21 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
     if (resp.has_tool_call) {
         ast_msg->tool_call_count = resp.tool_call_count;
         ast_msg->tool_calls = calloc(resp.tool_call_count, sizeof(ModelParsedToolCall));
-        for (size_t i = 0; i < resp.tool_call_count; i++) {
-            ast_msg->tool_calls[i].id = strdup(resp.tool_calls[i].id);
-            ast_msg->tool_calls[i].name = strdup(resp.tool_calls[i].name);
-            ast_msg->tool_calls[i].arguments_json = strdup(resp.tool_calls[i].arguments_json);
+        if (ast_msg->tool_calls) {
+            for (size_t i = 0; i < resp.tool_call_count; i++) {
+                ast_msg->tool_calls[i].id = strdup(resp.tool_calls[i].id ? resp.tool_calls[i].id : "");
+                ast_msg->tool_calls[i].name = strdup(resp.tool_calls[i].name ? resp.tool_calls[i].name : "");
+                ast_msg->tool_calls[i].arguments_json = strdup(resp.tool_calls[i].arguments_json ? resp.tool_calls[i].arguments_json : "{}");
+            }
+        } else {
+            ast_msg->tool_call_count = 0;
         }
     }
 
     agent->turn_count++;
     agent->turns_since_save++;
+    agent->lifetime_turns++;
+    almaz_agent_sync_self_model(agent);
 
     return resp;
 }
@@ -2035,8 +2109,11 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
         size_t est_tok = belya_agent_total_tokens(agent);
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
-        dyn_str_append(&telem_ds, "=== Belya Internal Self-Telemetry & Proprioception ===\n");
-        dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
+        size_t total_tools = agent->lifetime_tool_calls;
+        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+
+        dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
+        dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
             (int)getpid(),
 #if defined(__APPLE__)
             "macOS (Darwin)",
@@ -2047,10 +2124,21 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
 #endif
             belya_get_current_rss_mb(),
             agent->turn_count,
+            agent->lifetime_turns,
             est_tok,
             max_tok,
             tok_pct,
             agent->schema_count);
+        dyn_str_appendf(&telem_ds, "Affective State: Confidence: %.2f | Frustration: %.2f | Lifetime Tool Calls: %zu | Tool Success Rate: %.1f%% (%zu/%zu)\n",
+            (double)agent->confidence,
+            (double)agent->frustration,
+            agent->lifetime_tool_calls,
+            success_rate,
+            agent->lifetime_successes,
+            total_tools);
+        if (agent->frustration >= 0.60f) {
+            dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
+        }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
         dyn_str_free(&telem_ds);
@@ -2083,6 +2171,8 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
 
     agent->turn_count++;
     agent->turns_since_save++;
+    agent->lifetime_turns++;
+    almaz_agent_sync_self_model(agent);
 
     return resp;
 }
@@ -2144,12 +2234,55 @@ bool almaz_agent_update_self_model(BelyaAgent *agent, const char *capabilities, 
     return ok;
 }
 
+bool almaz_agent_sync_self_model(BelyaAgent *agent) {
+    if (!agent || !agent->db) return false;
+
+    size_t total = agent->lifetime_turns;
+    double success_rate = total > 0 ? ((double)agent->lifetime_successes / (double)total) : 1.0;
+    double rss_mb = belya_get_current_rss_mb();
+
+    char stats_json[512];
+    snprintf(stats_json, sizeof(stats_json),
+             "{\"turns\": %zu, \"successes\": %zu, \"failures\": %zu, \"success_rate\": %.3f, \"tool_calls\": %zu, \"rss_mb\": %.2f, \"confidence\": %.2f, \"frustration\": %.2f}",
+             total, agent->lifetime_successes, agent->lifetime_failures, success_rate,
+             agent->lifetime_tool_calls, rss_mb, (double)agent->confidence, (double)agent->frustration);
+
+    char *curr_cap = NULL;
+    char *curr_weak = NULL;
+    sqlite3_stmt *stmt = NULL;
+    const char *q = "SELECT capabilities, weaknesses FROM self_model WHERE active = 1 ORDER BY id DESC LIMIT 1;";
+    if (sqlite3_prepare_v2(agent->db, q, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *c = (const char *)sqlite3_column_text(stmt, 0);
+            const char *w = (const char *)sqlite3_column_text(stmt, 1);
+            if (c) curr_cap = strdup(c);
+            if (w) curr_weak = strdup(w);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (!curr_cap) {
+        curr_cap = strdup("[\"pure C99 systems programming\", \"zero memory leak compliance\", \"POSIX shell operations\", \"deterministic code verification\"]");
+    }
+    if (!curr_weak) {
+        curr_weak = strdup("[\"unbounded speculative edits without read_file\", \"deep conversational drift\"]");
+    }
+
+    bool res = almaz_agent_update_self_model(agent, curr_cap, curr_weak, stats_json);
+    if (curr_cap) free(curr_cap);
+    if (curr_weak) free(curr_weak);
+    return res;
+}
+
 void almaz_agent_record_appraisal(BelyaAgent *agent, bool success) {
     if (!agent) return;
+    agent->lifetime_tool_calls++;
     if (success) {
+        agent->lifetime_successes++;
         agent->confidence = (agent->confidence + 0.05f > 1.0f) ? 1.0f : (agent->confidence + 0.05f);
         agent->frustration = (agent->frustration - 0.10f < 0.0f) ? 0.0f : (agent->frustration - 0.10f);
     } else {
+        agent->lifetime_failures++;
         agent->confidence = (agent->confidence - 0.15f < 0.0f) ? 0.0f : (agent->confidence - 0.15f);
         agent->frustration = (agent->frustration + 0.20f > 1.0f) ? 1.0f : (agent->frustration + 0.20f);
     }
@@ -2157,6 +2290,7 @@ void almaz_agent_record_appraisal(BelyaAgent *agent, bool success) {
 
 void belya_agent_free(BelyaAgent *agent) {
     if (!agent) return;
+    almaz_agent_sync_self_model(agent);
     if (agent->db) {
         sqlite3_wal_checkpoint_v2(agent->db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
         sqlite3_close(agent->db);

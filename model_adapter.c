@@ -117,14 +117,15 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                             if (!ctx->tool_calls[idx].name) {
                                 ctx->tool_calls[idx].name = strdup(f_name);
                             } else {
-                                size_t nlen = strlen(ctx->tool_calls[idx].name) + strlen(f_name) + 1;
-                                char *ntmp = realloc(ctx->tool_calls[idx].name, nlen);
+                                size_t old_nlen = strlen(ctx->tool_calls[idx].name);
+                                size_t add_nlen = strlen(f_name);
+                                char *ntmp = realloc(ctx->tool_calls[idx].name, old_nlen + add_nlen + 1);
                                 if (!ntmp) {
                                     fprintf(stderr, "[Fatal] Out of memory appending tool name\n");
                                     abort();
                                 }
+                                memcpy(ntmp + old_nlen, f_name, add_nlen + 1);
                                 ctx->tool_calls[idx].name = ntmp;
-                                strcat(ctx->tool_calls[idx].name, f_name);
                             }
                         }
                         const char *f_args = json_obj_get_str(fn, "arguments");
@@ -132,14 +133,15 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                             if (!ctx->tool_calls[idx].arguments_json) {
                                 ctx->tool_calls[idx].arguments_json = strdup(f_args);
                             } else {
-                                size_t alen = strlen(ctx->tool_calls[idx].arguments_json) + strlen(f_args) + 1;
-                                char *atmp = realloc(ctx->tool_calls[idx].arguments_json, alen);
+                                size_t old_alen = strlen(ctx->tool_calls[idx].arguments_json);
+                                size_t add_alen = strlen(f_args);
+                                char *atmp = realloc(ctx->tool_calls[idx].arguments_json, old_alen + add_alen + 1);
                                 if (!atmp) {
                                     fprintf(stderr, "[Fatal] Out of memory appending tool arguments\n");
                                     abort();
                                 }
+                                memcpy(atmp + old_alen, f_args, add_alen + 1);
                                 ctx->tool_calls[idx].arguments_json = atmp;
-                                strcat(ctx->tool_calls[idx].arguments_json, f_args);
                             }
                         }
                     }
