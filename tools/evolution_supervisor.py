@@ -116,8 +116,16 @@ def send_telegram(text, env):
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.status == 200
     except Exception as e:
-        print(f"[!] Failed to send Telegram message: {e}")
-        return False
+        print(f"[!] Failed to send Telegram message with Markdown formatting: {e}. Retrying with plain text fallback...")
+        payload.pop("parse_mode", None)
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.status == 200
+        except Exception as e2:
+            print(f"[!] Failed to send Telegram message fallback: {e2}")
+            return False
 
 # =========================================================================
 # Phase 1: Real Outward Project Code & Security Audit
