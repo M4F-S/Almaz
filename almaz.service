@@ -7,6 +7,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/almaz
 EnvironmentFile=/opt/almaz/.env
+ExecStartPre=/opt/almaz/safety_check.sh
 ExecStart=/opt/almaz/almaz-watchdog --telegram
 Restart=always
 RestartSec=5s
