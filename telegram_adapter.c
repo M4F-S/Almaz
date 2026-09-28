@@ -857,6 +857,9 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                             bool tripped = belya_harness_record_tool_observation(harness, tc->name, tc->arguments_json, obs, &breaker_alert);
                             const char *final_obs = tripped ? breaker_alert : (obs ? obs : "Success");
 
+                            bool tool_success = (!tripped && obs && strncmp(obs, "Error:", 6) != 0 && strncmp(obs, "error:", 6) != 0);
+                            almaz_agent_record_appraisal(harness->agent, tool_success);
+
                             belya_agent_add_tool_result(harness->agent, tc->id, tc->name, final_obs);
                             if (breaker_alert) free(breaker_alert);
                             if (obs) free(obs);
