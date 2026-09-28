@@ -2174,6 +2174,17 @@ static void test_health_watcher(void) {
     health_watcher_run(&hw, agent, gw, NULL);
     assert(hw.gw_alerted == 1);
 
+    /* Observation->action bridge: a pending HEALTH_REMEDIATION goal exists */
+    int pending_goals = -1;
+    stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_goals WHERE category='HEALTH_REMEDIATION' AND status='pending';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        pending_goals = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    assert(pending_goals >= 1);
+
     int after = -1;
     stmt = NULL;
     if (sqlite3_prepare_v2(agent->db,

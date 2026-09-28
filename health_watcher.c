@@ -93,6 +93,24 @@ static void log_timeline(BelyaAgent *agent, const char *summary) {
     belya_agent_log_timeline(agent, "health_watcher", summary);
 }
 
+/* Observation -> action bridge (Week-3): each health alert transition also
+ * enqueues an intrinsic goal so the agent's goal engine can act on it. */
+static void enqueue_health_goal(BelyaAgent *agent, const char *detail) {
+    if (!agent || !agent->db) return;
+    sqlite3_stmt *stmt = NULL;
+    int pending = 0;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_goals WHERE category='HEALTH_REMEDIATION' AND status='pending';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        pending = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    if (pending > 0) return; /* already queued */
+    char goal[512];
+    snprintf(goal, sizeof(goal), "Investigate and remediate health event: %s", detail);
+    almaz_goals_add(agent->db, goal, "HEALTH_REMEDIATION", 80, "generated autonomously by health_watcher");
+}
+
 static void send_alert(HealthWatcher *hw, TelegramBot *bot, const char *text) {
     time_t now = time(NULL);
     if (hw->last_alert_time > 0 && (now - hw->last_alert_time) < HW_ALERT_MIN_GAP) {
@@ -130,6 +148,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                      "🩺 *[Almaz Self-Heal]* Disk pressure: %d%% free. Timeline pruned + WAL checkpointed.", free_pct);
             send_alert(hw, bot, alert);
             hw->disk_alerted = 1;
+            enqueue_health_goal(agent, "disk pressure low free space");
         }
     } else if (free_pct >= HW_DISK_HYSTERESIS_PCT) {
         if (hw->disk_alerted) {
@@ -154,6 +173,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                      (double)(rss_kb / 1024));
             send_alert(hw, bot, alert);
             hw->mem_alerted = 1;
+            enqueue_health_goal(agent, "memory pressure high RSS");
         }
     } else if (rss_kb > 0 && (rss_kb / 1024) < HW_RSS_RECOVER_MB) {
         if (hw->mem_alerted) {
@@ -191,6 +211,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                          "Operator may need to restore memory DB from backup.", path);
                 send_alert(hw, bot, alert);
                 hw->sqlite_alerted = 1;
+                enqueue_health_goal(agent, "sqlite integrity check failure");
             } else if (!persistent) {
                 if (hw->sqlite_alerted) {
                     hw->sqlite_alerted = 0;
@@ -216,6 +237,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                      gateway->consecutive_failures, gateway->endpoint ? gateway->endpoint : "endpoint");
             send_alert(hw, bot, alert);
             hw->gw_alerted = 1;
+            enqueue_health_goal(agent, "gateway consecutive failures");
         }
     } else if (gateway && gateway->consecutive_failures < HW_GW_FAIL_THRESHOLD) {
         if (hw->gw_alerted) {
@@ -237,6 +259,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                      bot->consecutive_poll_failures);
             send_alert(hw, bot, alert);
             hw->tg_alerted = 1;
+            enqueue_health_goal(agent, "telegram poll failures");
         }
     } else if (bot && bot->consecutive_poll_failures < HW_TG_FAIL_THRESHOLD) {
         if (hw->tg_alerted) {
