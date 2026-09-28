@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define ANOMALY_WINDOW_DAYS 7
 #define ANOMALY_MIN_COUNT 5      /* too few events -> noise */
@@ -12,21 +13,59 @@
 #define ANOMALY_MAX_TYPES 64
 #define ANOMALY_MAX_DAYS 64
 
-typedef struct {
-    char event_type[96];
-    int counts_pos;   /* index into counts array below */
-    double mean;
-    double sigma;
-} AnomalyTypeStat;
-
 static int cmp_double(const void *a, const void *b) {
     double x = *(const double *)a;
     double y = *(const double *)b;
     return (x > y) - (x < y);
 }
 
+/* Already logged an anomaly for this event_type today? (prevents feedback
+ * loops: the anomaly scan reads the very table it writes into.) */
+static bool anomaly_logged_today(sqlite3 *db, const char *type) {
+    if (!db || !type) return false;
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "SELECT COUNT(*) FROM agent_timeline "
+        "WHERE event_type='anomaly_detected' "
+        "AND date(created_at) = date('now') "
+        "AND summary LIKE 'anomaly_detected: event_type=%.20s%';";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, type, -1, SQLITE_STATIC);
+    bool logged = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) > 0;
+    sqlite3_finalize(stmt);
+    return logged;
+}
+
+/* Goal dedupe WITH a 24h TTL: a pending goal older than a day no longer
+ * suppresses new remediation goals (Kimi K3 P0-2). */
+static bool pending_goal_recent(sqlite3 *db) {
+    if (!db) return false;
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "SELECT COUNT(*) FROM agent_goals "
+        "WHERE category='ANOMALY_REMEDIATION' AND status='pending' "
+        "AND created_at >= datetime('now', '-1 day');";
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    bool recent = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) > 0;
+    sqlite3_finalize(stmt);
+    return recent;
+}
+
 int timeline_anomaly_scan(BelyaAgent *agent) {
     if (!agent || !agent->db) return -1;
+
+    /* True "today" for the UTC day bucket (Kimi K3 P0-3: the old code took
+     * the window MAX as "today", so a 6-day-old spike re-fired until it aged
+     * out and wrote feedback rows into the scanned table). */
+    char today[16];
+    time_t now = time(NULL);
+    struct tm tm_utc;
+    gmtime_r(&now, &tm_utc);
+    int yr = tm_utc.tm_year + 1900;
+    if (yr < 0 || yr > 9999) yr = 0;
+    char today_full[64];
+    snprintf(today_full, sizeof(today_full), "%04d-%02d-%02d", yr, tm_utc.tm_mon + 1, tm_utc.tm_mday);
+    snprintf(today, sizeof(today), "%.*s", (int)sizeof(today) - 1, today_full);
 
     sqlite3_stmt *stmt = NULL;
     const char *sql =
@@ -40,14 +79,16 @@ int timeline_anomaly_scan(BelyaAgent *agent) {
 
     char types[ANOMALY_MAX_TYPES][96];
     memset(types, 0, sizeof(types));
-    double counts[ANOMALY_MAX_TYPES][ANOMALY_MAX_DAYS];
-    int counts_n[ANOMALY_MAX_TYPES] = {0};
+    double history[ANOMALY_MAX_TYPES][ANOMALY_MAX_DAYS];
+    int hist_n[ANOMALY_MAX_TYPES] = {0};
+    double todays[ANOMALY_MAX_TYPES] = {0};
     int ntypes = 0;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *type = (const char *)sqlite3_column_text(stmt, 0);
+        const char *d = (const char *)sqlite3_column_text(stmt, 1);
         int c = sqlite3_column_int(stmt, 2);
-        if (!type || c <= 0) continue;
+        if (!type || !d || c <= 0) continue;
         int idx = -1;
         for (int i = 0; i < ntypes; i++) {
             if (types[i][0] != '\0' && strcmp(types[i], type) == 0) { idx = i; break; }
@@ -58,57 +99,51 @@ int timeline_anomaly_scan(BelyaAgent *agent) {
             types[idx][95] = '\0';
         }
         if (idx < 0) continue;
-        if (counts_n[idx] < ANOMALY_MAX_DAYS) {
-            counts[idx][counts_n[idx]++] = (double)c;
-        } else {
-            /* window full: replace oldest */
-            counts[idx][0] = (double)c;
+        if (strcmp(d, today) == 0) {
+            todays[idx] = (double)c;
+        } else if (hist_n[idx] < ANOMALY_MAX_DAYS) {
+            history[idx][hist_n[idx]++] = (double)c;
         }
     }
     sqlite3_finalize(stmt);
 
     int anomalies = 0;
     for (int i = 0; i < ntypes; i++) {
-        int n = counts_n[i];
-        if (n < 2) continue; /* need at least history + today */
+        int n = hist_n[i];
+        double today_count = todays[i];
+        if (n < 2 || today_count <= 0) continue;
         double sorted[ANOMALY_MAX_DAYS];
-        memcpy(sorted, counts[i], (size_t)n * sizeof(double));
+        memcpy(sorted, history[i], (size_t)n * sizeof(double));
         qsort(sorted, (size_t)n, sizeof(double), cmp_double);
-        double today_count = sorted[n - 1];
         double sum = 0.0;
-        for (int j = 0; j < n - 1; j++) sum += sorted[j];
-        double mean = sum / (double)(n - 1);
+        for (int j = 0; j < n; j++) sum += sorted[j];
+        double mean = sum / (double)n;
         double var = 0.0;
-        for (int j = 0; j < n - 1; j++) {
+        for (int j = 0; j < n; j++) {
             double d = sorted[j] - mean;
             var += d * d;
         }
-        double sigma = (n - 1 > 1) ? sqrt(var / (double)(n - 2)) : 0.0;
+        double sigma = (n > 1) ? sqrt(var / (double)(n - 1)) : 0.0;
 
         bool anomalous = sigma > 0.0 && today_count >= ANOMALY_MIN_COUNT &&
                          today_count > mean + ANOMALY_SIGMA * sigma;
-        if (anomalous) {
-            char summary[256];
-            snprintf(summary, sizeof(summary),
-                     "anomaly_detected: event_type=%.20s today=%d (7d mean=%.1f sigma=%.1f threshold=%.1f)",
-                     types[i], (int)today_count, mean, sigma, mean + ANOMALY_SIGMA * sigma);
-            belya_agent_log_timeline(agent, "anomaly_detected", summary);
+        if (!anomalous) continue;
+        if (anomaly_logged_today(agent->db, types[i])) continue;
 
-            sqlite3_stmt *gstmt = NULL;
-            int pending = 0;
-            if (sqlite3_prepare_v2(agent->db,
-                                   "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",
-                                   -1, &gstmt, NULL) == SQLITE_OK && sqlite3_step(gstmt) == SQLITE_ROW) {
-                pending = sqlite3_column_int(gstmt, 0);
-            }
-            sqlite3_finalize(gstmt);
-            if (pending == 0) {
-                char goal[320];
-                snprintf(goal, sizeof(goal), "Investigate timeline anomaly: event_type=%.20s (today=%d > mean+3σ)", types[i], (int)today_count);
-                almaz_goals_add(agent->db, goal, "ANOMALY_REMEDIATION", 70, "generated by timeline_anomaly_scan");
-            }
-            anomalies++;
+        char summary[256];
+        snprintf(summary, sizeof(summary),
+                 "anomaly_detected: event_type=%.20s today=%d (7d mean=%.1f sigma=%.1f threshold=%.1f)",
+                 types[i], (int)today_count, mean, sigma, mean + ANOMALY_SIGMA * sigma);
+        belya_agent_log_timeline(agent, "anomaly_detected", summary);
+
+        if (!pending_goal_recent(agent->db)) {
+            char goal[320];
+            snprintf(goal, sizeof(goal),
+                     "Investigate timeline anomaly: event_type=%.20s (today=%d > mean+3σ, day=%s)",
+                     types[i], (int)today_count, today);
+            almaz_goals_add(agent->db, goal, "ANOMALY_REMEDIATION", 70, "generated by timeline_anomaly_scan");
         }
+        anomalies++;
     }
 
     return anomalies;

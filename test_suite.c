@@ -2215,6 +2215,26 @@ static void test_health_watcher(void) {
     health_watcher_run(&hw, agent, gw, NULL);
     assert(hw.gw_alerted == 0);
 
+    /* P0-2 regression (Kimi K3): the 24h TTL on the health-goal dedupe.
+       Age the pending HEALTH_REMEDIATION goal, re-trigger the alert -> a NEW
+       goal must be created (old pending no longer suppresses). */
+    assert(sqlite3_exec(agent->db,
+                        "UPDATE agent_goals SET created_at = datetime('now','-3 days') WHERE category='HEALTH_REMEDIATION';",
+                        NULL, NULL, NULL) == SQLITE_OK);
+    gw->consecutive_failures = 5;
+    hw.last_check_time = 0;
+    health_watcher_run(&hw, agent, gw, NULL);
+    assert(hw.gw_alerted == 1);
+    int health_goals = 0;
+    stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_goals WHERE category='HEALTH_REMEDIATION' AND status='pending';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        health_goals = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    assert(health_goals >= 2);
+
     belya_agent_free(agent);
     model_gateway_free(gw);
     printf("  -> Health Watcher PASSED\n");
@@ -2339,8 +2359,29 @@ static void test_timeline_anomaly(void) {
                         "INSERT INTO agent_timeline (event_type, summary) VALUES ('calm_event','today');",
                         NULL, NULL, NULL) == SQLITE_OK);
 
+    /* P0-3 regression (Kimi K3): an OLD spike must NOT re-fire as "today".
+       oldspike: 25 events 6 days ago, 1/day since, 6 today. The old bug took
+       the window MAX (25) as today's count and flagged it. */
+    for (int i = 0; i < 25; i++) {
+        assert(sqlite3_exec(agent->db,
+                            "INSERT INTO agent_timeline (event_type, summary, created_at) VALUES ('oldspike','h',datetime('now','-6 days'));",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    }
+    for (int d = 1; d <= 5; d++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO agent_timeline (event_type, summary, created_at) VALUES "
+                 "('oldspike','h',datetime('now','-%d days'));", d);
+        assert(sqlite3_exec(agent->db, sql, NULL, NULL, NULL) == SQLITE_OK);
+    }
+    for (int i = 0; i < 6; i++) {
+        assert(sqlite3_exec(agent->db,
+                            "INSERT INTO agent_timeline (event_type, summary) VALUES ('oldspike','today');",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    }
+
     int anomalies = timeline_anomaly_scan(agent);
-    assert(anomalies == 1);
+    assert(anomalies == 1); /* only spike_event: calm uniform, oldspike history-skewed */
 
     int goals = 0;
     sqlite3_stmt *s = NULL;
@@ -2362,6 +2403,24 @@ static void test_timeline_anomaly(void) {
     }
     sqlite3_finalize(s);
     assert(goals == 1);
+
+    /* P0-2 regression (Kimi K3) — covered on the HEALTH path where the 24h TTL
+   is the ONLY dedupe: a pending health goal older than 24h must not suppress
+   new remediation goals forever. (The anomaly path is deduped by the daily
+   log gate instead; both arms were fixed — see health_watcher enqueue.) */
+assert(sqlite3_exec(agent->db,
+                    "UPDATE agent_goals SET created_at = datetime('now','-3 days') WHERE category='ANOMALY_REMEDIATION';",
+                    NULL, NULL, NULL) == SQLITE_OK);
+assert(timeline_anomaly_scan(agent) >= 1);
+s = NULL;
+if (sqlite3_prepare_v2(agent->db,
+                       "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",
+                       -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW) {
+    goals = sqlite3_column_int(s, 0);
+}
+sqlite3_finalize(s);
+/* log gate for today already fired -> no new anomaly goal today */
+assert(goals == 1);
 
     belya_agent_free(agent);
     model_gateway_free(gw);

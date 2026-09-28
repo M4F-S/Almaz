@@ -71,11 +71,24 @@ if ! systemctl is-active --quiet almaz 2>/dev/null; then
   fail "witness failed (service inactive); rolled back to previous ACTIVE"
 fi
 
+# Functional-ish witness: the daemon must have reported Online (Kimi K3 P1:
+# is-active alone passes alive-but-braindead candidates).
+if ! journalctl -u almaz --no-pager --since "120 seconds ago" 2>/dev/null | grep -q "Almaz Sovereign Telegram Bot Daemon Online"; then
+  cp -a ".$ACTIVE.rollback" "./$ACTIVE"
+  systemctl restart almaz 2>/dev/null || true
+  fail "witness failed (daemon did not report Online); rolled back to previous ACTIVE"
+fi
+
 grep -q "Crash-loop detected" <(journalctl -u almaz --no-pager --since "2 minutes ago" 2>/dev/null) && {
   cp -a "./$LKG" "./$ACTIVE"
   systemctl restart almaz 2>/dev/null || true
   fail "crash-loop detected during witness; rolled back to LKG=$LKG"
 }
+
+# Rotate LKG: the pre-promote ACTIVE is the newest known-good (Kimi K3 P1:
+# stale LKG ossifies the rollback target).
+cp -a ".$ACTIVE.rollback" "./$LKG"
+echo "[promote] LKG rotated: previous ACTIVE -> $LKG"
 
 echo "[promote] SUCCESS: $STAGING promoted to ACTIVE ($ACTIVE). LKG untouched: $LKG"
 notify "✅ *[Almaz Deploy]* Candidate promoted to ACTIVE (selfest PASS + 90s witness OK). LKG=$(basename "$LKG")"

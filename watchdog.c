@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <signal.h>
 #include <time.h>
 #include <errno.h>
@@ -12,6 +13,7 @@
 
 static volatile sig_atomic_t g_keep_running = 1;
 static pid_t g_child_pid = 0;
+static time_t g_last_crash_notify_ts = 0; /* rate limit Telegram crash spam */
 
 #define DEPLOY_STATE_FILE ".deploy_state"
 #define CRASH_WINDOW_SEC 60
@@ -38,17 +40,19 @@ static void load_deploy_state(void) {
             char v[STATE_VAL_MAX + 1];
             snprintf(v, sizeof(v), "%.*s", STATE_VAL_MAX, line + 7);
             trim_crlf(v);
-            if (v[0] != '\0') snprintf(g_active_bin, sizeof(g_active_bin), "./%s", v);
+            if (v[0] != '\0' && !strchr(v, '/') && !strstr(v, "..")) snprintf(g_active_bin, sizeof(g_active_bin), "./%s", v);
         } else if (strncmp(line, "LKG=", 4) == 0) {
             char v[STATE_VAL_MAX + 1];
             snprintf(v, sizeof(v), "%.*s", STATE_VAL_MAX, line + 4);
             trim_crlf(v);
-            if (v[0] != '\0') snprintf(g_lkg_bin, sizeof(g_lkg_bin), "./%s", v);
+            /* validate: no path separators, no '..' — never exec an
+               arbitrary path from a file a compromised evolution could write */
+            if (v[0] != '\0' && !strchr(v, '/') && !strstr(v, "..")) snprintf(g_lkg_bin, sizeof(g_lkg_bin), "./%s", v);
         } else if (strncmp(line, "STAGING=", 8) == 0) {
             char v[STATE_VAL_MAX + 1];
             snprintf(v, sizeof(v), "%.*s", STATE_VAL_MAX, line + 8);
             trim_crlf(v);
-            if (v[0] != '\0') snprintf(g_staging_bin, sizeof(g_staging_bin), "./%s", v);
+            if (v[0] != '\0' && !strchr(v, '/') && !strstr(v, "..")) snprintf(g_staging_bin, sizeof(g_staging_bin), "./%s", v);
         }
     }
     fclose(fp);
@@ -71,6 +75,11 @@ static void watchdog_sig_handler(int sig) {
 }
 
 static void log_crash_event(int exit_code, int term_sig) {
+    /* bounded log: truncate at 1 MB (Kimi K3 P1: unbounded crash log growth) */
+    struct stat st;
+    if (stat("almaz_crashes.log", &st) == 0 && st.st_size > 1048576) {
+        unlink("almaz_crashes.log");
+    }
     FILE *fp = fopen("almaz_crashes.log", "a");
     if (!fp) return;
     time_t now = time(NULL);
@@ -206,7 +215,11 @@ int main(int argc, char **argv) {
         printf("\033[1;31m[Watchdog Alert] Almaz terminated (exit %d, sig %d) (restart #%d).\033[0m\n",
                exit_code, term_sig, restart_count);
         log_crash_event(exit_code, term_sig);
-        notify_telegram_crash(tg_token, tg_chat, exit_code, term_sig, restart_count);
+        /* rate-limit Telegram crash spam: at most one alert per 5 min */
+        if (now - g_last_crash_notify_ts >= 300) {
+            notify_telegram_crash(tg_token, tg_chat, exit_code, term_sig, restart_count);
+            g_last_crash_notify_ts = now;
+        }
 
         // Crash-loop circuit breaker: CRASH_THRESHOLD crashes within CRASH_WINDOW_SEC
         if (crash_count == CRASH_THRESHOLD) {
@@ -239,7 +252,11 @@ int main(int argc, char **argv) {
 
         printf("[Watchdog] Backing off %d seconds before respawning...\n", backoff_sec);
         sleep(backoff_sec);
-        backoff_sec = (backoff_sec < 60) ? (backoff_sec * 2) : 60;
+        /* Keep breaker backoff (>=300s) until the child proves stable; a
+           fresh 300s survival resets it in the crash handler above. */
+        if (backoff_sec < 300) {
+            backoff_sec = (backoff_sec < 60) ? (backoff_sec * 2) : 60;
+        }
     }
 
     free(child_argv);

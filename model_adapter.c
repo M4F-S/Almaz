@@ -515,7 +515,11 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
                          (long)res.prompt_tokens, (long)res.completion_tokens,
                          (long)res.cached_tokens, duration_sec, &sealed);
     if (sealed) self->budget_tripped = true;
-    budget_state_save(self->budget_path, &self->budget_state);
+    if (budget_state_save(self->budget_path, &self->budget_state) != 0) {
+        /* Kimi K3 P1: an ignored save lets a sealed budget silently reopen
+           after a restart (state rolls back to the last persisted value). */
+        fprintf(stderr, "[budget] WARNING: failed to persist budget state to %s\n", self->budget_path);
+    }
 
     bool ok = res.has_tool_call ||
               (res.content && strncmp(res.content, "Error:", 6) != 0 &&
