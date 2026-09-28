@@ -50,6 +50,10 @@ Almaz is **not a passive chat assistant**. It is a **continuous, self-evolving, 
 - **Sanitizer Cleanliness:**
   - **38/38 Unit Tests Passed (100%)** under Clang/GCC AddressSanitizer and UndefinedBehaviorSanitizer.
   - **52/52 Hidden Holdout Assertions Passed (100%)** under AddressSanitizer and UndefinedBehaviorSanitizer.
+- **Darwinian Evolution & Novelty Gating:**
+  - **6/6 Novelty Gate Tests Passed (100%)** in `tools/test_novelty_gate.py`.
+  - Cryptographic SHA-256 fingerprinting on unified diff patches & semantic transformation signatures.
+  - Multi-tier taboo filtering: blocks rejected IDs, matching diff hashes, and matching semantic signatures from re-entering sandbox.
 - **Stability:** `almaz_crashes.log` is clean (**0 crashes recorded**). Memory footprint stable at ~15 MB RSS.
 
 ---
@@ -70,11 +74,15 @@ Almaz is **not a passive chat assistant**. It is a **continuous, self-evolving, 
 
 ---
 
-## 📋 4. Immediate Backlog for New Almaz Session
+## 📋 4. Backlog & Progress Status
 
-1. **Novelty Gating in Darwinian Evolution Pool:**
-   - In `tools/evolution_supervisor.py`, add SHA-256 fingerprinting of rejected patches in `mutation_history.json`.
-   - Disallow re-testing previously failed phenotypes.
+1. **[COMPLETED] Novelty Gating in Darwinian Evolution Pool:**
+   - Added SHA-256 fingerprinting of rejected patches in `mutation_history.json`.
+   - Implemented `compute_patch_and_hash`, `compute_mutation_signature`, and `evaluate_novelty_gate` in `tools/evolution_supervisor.py`.
+   - Comprehensive rejection handling across ASan compile, unit test failure, holdout compile, holdout test failure, and performance regression with `patches/rejected_*.patch` storage.
+   - Disallowed re-testing previously failed phenotypes via taboo search filter.
+   - Added `--dry-run`, `--audit-only`, and `--force-retest` CLI flags.
+   - Verified via dedicated test suite `tools/test_novelty_gate.py` (6/6 passing).
 2. **Active Self-Healing Rule & Skill Synthesis:**
    - When recurring errors appear $\ge 3\times$ in `agent_timeline`, automatically author a preventative rule in `rules/` or pattern in `TROUBLESHOOTING.md`.
 3. **Autonomic SQLite WAL Truncation:**
