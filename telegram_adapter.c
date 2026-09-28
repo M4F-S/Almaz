@@ -1,5 +1,6 @@
 #include "telegram_adapter.h"
 #include "health_watcher.h"
+#include "timeline_anomaly.h"
 #include <curl/curl.h>
 #include <signal.h>
 #include <time.h>
@@ -417,6 +418,10 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                            bot->autonomic_cycles_today, idle_sec);
                     char *alert = NULL;
                     almaz_autonomic_cognition_cycle(harness, &alert);
+                    int anomalies = timeline_anomaly_scan(harness->agent);
+                    if (anomalies > 0) {
+                        printf("[Almaz Autonomic Subconscious] %d timeline anomaly(ies) detected; goals enqueued.\n", anomalies);
+                    }
                     if (alert) {
                         if (bot->allowed_chat_id && strlen(bot->allowed_chat_id) > 0) {
                             telegram_bot_send_message(bot, bot->allowed_chat_id, alert);

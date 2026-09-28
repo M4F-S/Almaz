@@ -846,6 +846,13 @@ def main():
     healing_status = run_self_healing_analysis()
     update_self_model_from_evolution(evo_result, arena_result)
     dispatch_daily_report(findings, evo_result, arena_result, healing_status, env)
+    # Week-6 opt-in end-to-end loop: ONLY when explicitly enabled.
+    if os.environ.get("BELYA_AUTO_PROMOTE") == "1":
+        print("[+] BELYA_AUTO_PROMOTE=1: running auto-promote hook...")
+        try:
+            subprocess.run(["/opt/almaz/tools/auto_promote.sh"], timeout=1500)
+        except Exception as e:
+            print(f"[!] auto_promote hook failed: {e}")
     print("[+] All 5 Daily Mission Phases Completed Successfully.\n")
 
 if __name__ == "__main__":

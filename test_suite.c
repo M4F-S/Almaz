@@ -2,6 +2,7 @@
 #include "telegram_adapter.h"
 #include "minifrontmatter.h"
 #include "health_watcher.h"
+#include "timeline_anomaly.h"
 #include <assert.h>
 #include <unistd.h>
 
@@ -2302,6 +2303,71 @@ static void test_budget_controller(void) {
     printf("  -> Budget Controller PASSED\n");
 }
 
+static void test_timeline_anomaly(void) {
+    printf("--- Timeline Anomaly ---\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    assert(gw != NULL);
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Anomaly test");
+    assert(agent != NULL);
+
+    /* 6 days of history; spike_event has variance (extra on days -4 and -6),
+     * calm_event is perfectly uniform (sigma 0 -> never flagged). */
+    for (int d = 1; d <= 6; d++) {
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO agent_timeline (event_type, summary, created_at) VALUES "
+                 "('calm_event','h',datetime('now','-%d days'));", 7 - d);
+        assert(sqlite3_exec(agent->db, sql, NULL, NULL, NULL) == SQLITE_OK);
+        snprintf(sql, sizeof(sql),
+                 "INSERT INTO agent_timeline (event_type, summary, created_at) VALUES "
+                 "('spike_event','h',datetime('now','-%d days'));", 7 - d);
+        assert(sqlite3_exec(agent->db, sql, NULL, NULL, NULL) == SQLITE_OK);
+        if (d == 4 || d == 6) {
+            snprintf(sql, sizeof(sql),
+                     "INSERT INTO agent_timeline (event_type, summary, created_at) VALUES "
+                     "('spike_event','x2',datetime('now','-%d days'));", 7 - d);
+            assert(sqlite3_exec(agent->db, sql, NULL, NULL, NULL) == SQLITE_OK);
+        }
+    }
+    /* Today: 8 spike events + 1 calm -> only spike is anomalous */
+    for (int i = 0; i < 8; i++) {
+        assert(sqlite3_exec(agent->db,
+                            "INSERT INTO agent_timeline (event_type, summary) VALUES ('spike_event','today');",
+                            NULL, NULL, NULL) == SQLITE_OK);
+    }
+    assert(sqlite3_exec(agent->db,
+                        "INSERT INTO agent_timeline (event_type, summary) VALUES ('calm_event','today');",
+                        NULL, NULL, NULL) == SQLITE_OK);
+
+    int anomalies = timeline_anomaly_scan(agent);
+    assert(anomalies == 1);
+
+    int goals = 0;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",
+                           -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW) {
+        goals = sqlite3_column_int(s, 0);
+    }
+    sqlite3_finalize(s);
+    assert(goals == 1);
+
+    /* Re-scan: anomaly persists but goal stays deduped (still 1) */
+    assert(timeline_anomaly_scan(agent) >= 1);
+    s = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",
+                           -1, &s, NULL) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW) {
+        goals = sqlite3_column_int(s, 0);
+    }
+    sqlite3_finalize(s);
+    assert(goals == 1);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    printf("  -> Timeline Anomaly PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2344,6 +2410,7 @@ int main(void) {
     test_autonomic_subconscious_and_goals();
     test_health_watcher();
     test_budget_controller();
-    printf("================ All Tests Passed Successfully (40/40 - 100%%) ================\n\n");
+    test_timeline_anomaly();
+    printf("================ All Tests Passed Successfully (41/41 - 100%%) ================\n\n");
     return 0;
 }

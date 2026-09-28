@@ -1,18 +1,18 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
-LIBS = -lcurl -lsqlite3
+LIBS = -lcurl -lsqlite3 -lm
 
-SRCS = budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c main.c
+SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c main.c
 OBJS = $(SRCS:.c=.o)
 TARGET = almaz
 
-TEST_SRCS = budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c test_suite.c
+TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c test_suite.c
 TEST_TARGET = almaz_test
 
-HOLDOUT_SRCS = budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c test_holdout.c
+HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c test_holdout.c
 HOLDOUT_TARGET = almaz_holdout
 
-BENCHMARK_SRCS = budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c benchmark_runner.c
+BENCHMARK_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c health_watcher.c benchmark_runner.c
 BENCHMARK_TARGET = almaz_benchmark
 
 WATCHDOG_TARGET = almaz-watchdog
