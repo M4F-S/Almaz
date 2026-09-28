@@ -38,3 +38,10 @@ docs/
 # Evolution outputs
 reports/
 patches/
+
+# Runtime artifacts (never commit)
+budget_state.txt
+.deploy_state
+*.rollback
+almaz_crashes.log
+*.tmp
