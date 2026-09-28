@@ -1,5 +1,67 @@
 #include "belya_harness.h"
 #include "telegram_adapter.h"
+#include <sqlite3.h>
+#include <stdbool.h>
+
+static int selfest_check(const char *name, bool ok) {
+    printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name);
+    return ok ? 0 : 1;
+}
+
+static int run_selfest(void) {
+    printf("[Selfest] Almaz self-test\n");
+    int rc = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open("almaz_memory.sqlite", &db) != SQLITE_OK) {
+        printf("  [FAIL] sqlite open almaz_memory.sqlite: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return 1;
+    }
+
+    char *err = NULL;
+    int ok_int = sqlite3_exec(db, "PRAGMA integrity_check;", NULL, NULL, &err);
+    rc += selfest_check("sqlite integrity_check", ok_int == SQLITE_OK && !err);
+    sqlite3_free(err);
+
+    sqlite3_stmt *stmt = NULL;
+    const char *jm = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode;", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) {
+        jm = (const char *)sqlite3_column_text(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    rc += selfest_check("journal_mode=wal", jm && strstr(jm, "wal") != NULL);
+
+    const char *tables[] = {"self_model", "agent_goals", "agent_timeline", "agent_memory_fts", "session_messages"};
+    for (size_t i = 0; i < sizeof(tables) / sizeof(tables[0]); i++) {
+        char q[256];
+        snprintf(q, sizeof(q), "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='%s';", tables[i]);
+        bool found = false;
+        stmt = NULL;
+        if (sqlite3_prepare_v2(db, q, -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+            found = sqlite3_column_int(stmt, 0) > 0;
+        }
+        sqlite3_finalize(stmt);
+        rc += selfest_check(tables[i], found);
+    }
+
+    int self_model_rows = -1;
+    stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM self_model WHERE active=1;", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) {
+        self_model_rows = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    rc += selfest_check("self_model active row", self_model_rows > 0);
+
+    sqlite3_close(db);
+    if (rc == 0) {
+        printf("[Selfest] ALL CHECKS PASSED\n");
+        return 0;
+    }
+    printf("[Selfest] %d CHECK(S) FAILED\n", rc);
+    return 1;
+}
 
 static void load_env_file(const char *path) {
     FILE *fp = fopen(path, "r");
@@ -49,7 +111,8 @@ int main(int argc, char **argv) {
             printf("  -r, --resume <session_id>  Resume saved conversation session\n");
             printf("  -p, --prompt <prompt>      Execute headless mission prompt and exit\n");
             printf("  --headless <prompt>        Alias for --prompt\n");
-            printf("  --eval <prompt>            Alias for --prompt\n\n");
+            printf("  --eval <prompt>            Alias for --prompt\n");
+            printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n\n");
             return 0;
         } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0) {
             telegram_mode = true;
@@ -62,6 +125,8 @@ int main(int argc, char **argv) {
             resume_session_id = argv[++i];
         } else if ((strcmp(argv[i], "--headless") == 0 || strcmp(argv[i], "--eval") == 0 || strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--prompt") == 0) && i + 1 < argc) {
             headless_prompt = argv[++i];
+        } else if (strcmp(argv[i], "--selfest") == 0) {
+            return run_selfest();
         }
     }
 
