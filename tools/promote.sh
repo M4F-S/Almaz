@@ -47,7 +47,11 @@ echo "[promote] Gate 1 passed."
 echo "[promote] Gate 2: protocol sanity (candidate announces same watchdog contract)"
 "$CAND" --help 2>&1 | grep -q -- "--telegram" || fail "candidate --help lacks --telegram contract"
 
-cp -a "$CAND" "./$STAGING"
+if [ "$CAND" -ef "./$STAGING" ]; then
+  echo "[promote] Candidate is already the STAGING slot; skipping copy."
+else
+  cp -a "$CAND" "./$STAGING"
+fi
 chmod 755 "./$STAGING"
 
 echo "[promote] Promoting $STAGING -> $ACTIVE"
