@@ -70,6 +70,13 @@ bool is_path_jailed(const char *path, const char *workspace_root, bool is_write)
 bool is_path_safe(const char *path);
 char *belya_troubleshooting_resolve(const char *error_trace, const char *troubleshooting_path);
 bool almaz_should_retrieve_memory(const char *user_input);
+
+// Autonomic Subconscious Idle Loop & Intrinsic Goal Engine
+bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert);
+void almaz_goals_generate_deterministic(BelyaHarness *h);
+bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
+bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);
+
 void belya_harness_free(BelyaHarness *h);
 
 extern const char *g_active_custom_script_path;

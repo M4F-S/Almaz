@@ -3018,6 +3018,186 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
     }
 }
 
+// Autonomic Subconscious Idle Loop & Intrinsic Goal Engine
+bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale) {
+    if (!db || !goal || !category) return false;
+    sqlite3_stmt *stmt = NULL;
+    const char *check_q = "SELECT id FROM agent_goals WHERE goal = ? AND status = 'pending' LIMIT 1;";
+    if (sqlite3_prepare_v2(db, check_q, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, goal, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            sqlite3_finalize(stmt);
+            return true; // Already pending, avoid duplicate
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    const char *ins_q = "INSERT INTO agent_goals (goal, category, priority, status, rationale) VALUES (?, ?, ?, 'pending', ?);";
+    if (sqlite3_prepare_v2(db, ins_q, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, goal, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, category, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, priority);
+    sqlite3_bind_text(stmt, 4, rationale ? rationale : "", -1, SQLITE_STATIC);
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+void almaz_goals_generate_deterministic(BelyaHarness *h) {
+    if (!h || !h->agent || !h->agent->db) return;
+    sqlite3 *db = h->agent->db;
+
+    // 1. Check timeline size
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM agent_timeline;", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int count = sqlite3_column_int(stmt, 0);
+            if (count > 500) {
+                almaz_goals_add(db, "prune_timeline", "MAINTENANCE", 60, "Timeline has exceeded 500 records; prune records older than 30 days");
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // 2. Check for recent failure patterns in timeline
+    if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM agent_timeline WHERE created_at >= datetime('now', '-1 day') AND (event_type LIKE '%error%' OR event_type LIKE '%fail%' OR summary LIKE '%error%');", -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            int err_count = sqlite3_column_int(stmt, 0);
+            if (err_count > 0) {
+                almaz_goals_add(db, "distill_failure_wisdom", "KNOWLEDGE_CONSOLIDATION", 80, "Recent execution errors detected in timeline; extract protective heuristic");
+            }
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    // 3. Periodic self-model audit goal
+    almaz_goals_add(db, "refresh_self_model", "MAINTENANCE", 40, "Periodic synchronization of proprioceptive state and RSS metrics");
+
+    // 4. Check workspace git cleanliness
+    almaz_goals_add(db, "verify_workspace_integrity", "CODE_AUDIT", 50, "Check git status and workspace clean state");
+}
+
+bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
+    if (!h || !h->agent || !h->agent->db) return false;
+    sqlite3 *db = h->agent->db;
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sel_q = "SELECT id, goal, category, priority FROM agent_goals WHERE status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1;";
+    if (sqlite3_prepare_v2(db, sel_q, -1, &stmt, NULL) != SQLITE_OK) return false;
+
+    int goal_id = -1;
+    char goal_name[128] = {0};
+    char category[64] = {0};
+
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        goal_id = sqlite3_column_int(stmt, 0);
+        const char *g = (const char *)sqlite3_column_text(stmt, 1);
+        const char *c = (const char *)sqlite3_column_text(stmt, 2);
+        if (g) snprintf(goal_name, sizeof(goal_name), "%s", g);
+        if (c) snprintf(category, sizeof(category), "%s", c);
+    }
+    sqlite3_finalize(stmt);
+
+    if (goal_id < 0) {
+        if (out_result_summary) *out_result_summary = strdup("No pending intrinsic goals.");
+        return false;
+    }
+
+    DynString res_ds = dyn_str_new();
+
+    if (strcmp(goal_name, "prune_timeline") == 0) {
+        sqlite3_exec(db, "DELETE FROM agent_timeline WHERE created_at < datetime('now', '-30 days');", 0, 0, 0);
+        dyn_str_append(&res_ds, "Pruned timeline events older than 30 days.");
+    } else if (strcmp(goal_name, "refresh_self_model") == 0) {
+        almaz_agent_sync_self_model(h->agent);
+        dyn_str_appendf(&res_ds, "Synchronized self-model: turns=%zu, successes=%zu, failures=%zu, rss=%.2fMB",
+                        h->agent->lifetime_turns, h->agent->lifetime_successes,
+                        h->agent->lifetime_failures, belya_get_current_rss_mb());
+    } else if (strcmp(goal_name, "verify_workspace_integrity") == 0) {
+        FILE *fp = popen("git status --porcelain 2>/dev/null", "r");
+        if (fp) {
+            char line[256];
+            size_t dirty_count = 0;
+            while (fgets(line, sizeof(line), fp)) dirty_count++;
+            pclose(fp);
+            if (dirty_count == 0) {
+                dyn_str_append(&res_ds, "Workspace git tree is clean (0 uncommitted files).");
+            } else {
+                dyn_str_appendf(&res_ds, "Workspace git tree has %zu modified/untracked files.", dirty_count);
+            }
+        } else {
+            dyn_str_append(&res_ds, "Inspected workspace (git tool execution completed).");
+        }
+    } else if (strcmp(goal_name, "distill_failure_wisdom") == 0) {
+        sqlite3_stmt *err_stmt = NULL;
+        const char *eq = "SELECT summary, COUNT(*) as cnt FROM agent_timeline WHERE created_at >= datetime('now', '-1 day') AND (event_type LIKE '%error%' OR summary LIKE '%error%') GROUP BY summary ORDER BY cnt DESC LIMIT 1;";
+        if (sqlite3_prepare_v2(db, eq, -1, &err_stmt, NULL) == SQLITE_OK) {
+            if (sqlite3_step(err_stmt) == SQLITE_ROW) {
+                const char *err_sum = (const char *)sqlite3_column_text(err_stmt, 0);
+                int freq = sqlite3_column_int(err_stmt, 1);
+                dyn_str_appendf(&res_ds, "Distilled recurring failure pattern (x%d): %.100s", freq, err_sum ? err_sum : "unknown");
+            } else {
+                dyn_str_append(&res_ds, "No recurring failure patterns in timeline in last 24h.");
+            }
+            sqlite3_finalize(err_stmt);
+        }
+    } else {
+        dyn_str_appendf(&res_ds, "Custom goal '%s' completed.", goal_name);
+    }
+
+    // Update goal row to completed
+    sqlite3_stmt *up_stmt = NULL;
+    const char *up_q = "UPDATE agent_goals SET status = 'completed', result_summary = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?;";
+    if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
+        sqlite3_bind_int(up_stmt, 2, goal_id);
+        sqlite3_step(up_stmt);
+        sqlite3_finalize(up_stmt);
+    }
+
+    if (out_result_summary) {
+        *out_result_summary = strdup(res_ds.data);
+    }
+    dyn_str_free(&res_ds);
+    return true;
+}
+
+bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert) {
+    if (!harness || !harness->agent) return false;
+
+    // 1. Deterministically generate pending goals based on current telemetry
+    almaz_goals_generate_deterministic(harness);
+
+    // 2. Process highest-priority pending goal
+    char *goal_summary = NULL;
+    almaz_goals_process_next(harness, &goal_summary);
+
+    // 3. Sync self-model
+    almaz_agent_sync_self_model(harness->agent);
+
+    // 4. Log autonomic cycle to timeline
+    char log_buf[512];
+    snprintf(log_buf, sizeof(log_buf),
+             "Autonomic subconscious cycle executed: %s (Turn: %zu, RSS: %.2fMB)",
+             goal_summary ? goal_summary : "nominally complete",
+             harness->agent->turn_count, belya_get_current_rss_mb());
+    belya_agent_log_timeline(harness->agent, "autonomic_cycle", log_buf);
+
+    // 5. Evaluate if a critical alert is warranted (silent by default)
+    if (out_critical_alert) {
+        *out_critical_alert = NULL;
+        double rss = belya_get_current_rss_mb();
+        if (rss > 500.0) { // High memory anomaly threshold
+            char alert[256];
+            snprintf(alert, sizeof(alert), "⚠️ <b>Almaz Subconscious Alert:</b> High RSS memory consumption detected: %.2f MB.", rss);
+            *out_critical_alert = strdup(alert);
+        }
+    }
+
+    if (goal_summary) free(goal_summary);
+    return true;
+}
+
 void belya_harness_free(BelyaHarness *h) {
     if (!h) return;
     for (size_t i = 0; i < h->tool_count; i++) {

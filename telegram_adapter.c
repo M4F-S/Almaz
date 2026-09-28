@@ -95,6 +95,10 @@ TelegramBot *telegram_bot_init(const char *bot_token, const char *allowed_chat_i
     }
     bot->last_update_id = 0;
     bot->running = false;
+    bot->last_activity_time = time(NULL);
+    bot->autonomic_cycles_today = 0;
+    bot->last_autonomic_time = 0;
+    bot->last_autonomic_day = -1;
     return bot;
 }
 
@@ -379,34 +383,65 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
 
         JsonValue *updates = json_obj_get(resp, "result");
         if (updates && updates->type == JSON_ARRAY) {
-            for (size_t i = 0; i < updates->u.array.count; i++) {
-                JsonValue *up = updates->u.array.items[i];
-                long u_id = (long)json_obj_get_num(up, "update_id", 0);
-                if (u_id > bot->last_update_id) {
-                    bot->last_update_id = u_id;
+            if (updates->u.array.count == 0) {
+                // Autonomic Subconscious Idle Loop
+                time_t now = time(NULL);
+                struct tm tm_now;
+                localtime_r(&now, &tm_now);
+                if (bot->last_autonomic_day != tm_now.tm_yday) {
+                    bot->autonomic_cycles_today = 0;
+                    bot->last_autonomic_day = tm_now.tm_yday;
                 }
 
-                JsonValue *msg = json_obj_get(up, "message");
-                if (!msg) continue;
+                double idle_sec = difftime(now, bot->last_activity_time);
+                double since_last_cycle = difftime(now, bot->last_autonomic_time);
 
-                JsonValue *chat = json_obj_get(msg, "chat");
-                if (!chat) continue;
-
-                double cid_num = json_obj_get_num(chat, "id", 0);
-                char chat_id_str[64];
-                snprintf(chat_id_str, sizeof(chat_id_str), "%.0f", cid_num);
-
-                const char *text = json_obj_get_str(msg, "text");
-                if (!text || strlen(text) == 0) continue;
-
-                // Security Authorization Check
-                if (!telegram_is_authorized(bot, chat_id_str)) {
-                    printf("\033[1;31m[Security Alert] Blocked unauthorized message from Chat ID: %s\033[0m\n", chat_id_str);
-                    char warn[256];
-                    snprintf(warn, sizeof(warn), "⛔ <b>Access Denied:</b> Your Telegram Chat ID (<code>%s</code>) is not authorized on this VPS.", chat_id_str);
-                    telegram_bot_send_message(bot, chat_id_str, warn);
-                    continue;
+                // Idle >= 30m (1800s), max 3 cycles/day, >= 2h (7200s) spacing
+                if (idle_sec >= 1800.0 && bot->autonomic_cycles_today < 3 && since_last_cycle >= 7200.0) {
+                    bot->last_autonomic_time = now;
+                    bot->autonomic_cycles_today++;
+                    printf("\n\033[1;35m[Almaz Autonomic Subconscious]\033[0m Triggering idle cycle (%d/3 today, idle %.0fs)...\n",
+                           bot->autonomic_cycles_today, idle_sec);
+                    char *alert = NULL;
+                    almaz_autonomic_cognition_cycle(harness, &alert);
+                    if (alert) {
+                        if (bot->allowed_chat_id && strlen(bot->allowed_chat_id) > 0) {
+                            telegram_bot_send_message(bot, bot->allowed_chat_id, alert);
+                        }
+                        free(alert);
+                    }
                 }
+            } else {
+                for (size_t i = 0; i < updates->u.array.count; i++) {
+                    JsonValue *up = updates->u.array.items[i];
+                    long u_id = (long)json_obj_get_num(up, "update_id", 0);
+                    if (u_id > bot->last_update_id) {
+                        bot->last_update_id = u_id;
+                    }
+
+                    JsonValue *msg = json_obj_get(up, "message");
+                    if (!msg) continue;
+
+                    JsonValue *chat = json_obj_get(msg, "chat");
+                    if (!chat) continue;
+
+                    double cid_num = json_obj_get_num(chat, "id", 0);
+                    char chat_id_str[64];
+                    snprintf(chat_id_str, sizeof(chat_id_str), "%.0f", cid_num);
+
+                    const char *text = json_obj_get_str(msg, "text");
+                    if (!text || strlen(text) == 0) continue;
+
+                    // Security Authorization Check
+                    if (!telegram_is_authorized(bot, chat_id_str)) {
+                        printf("\033[1;31m[Security Alert] Blocked unauthorized message from Chat ID: %s\033[0m\n", chat_id_str);
+                        char warn[256];
+                        snprintf(warn, sizeof(warn), "⛔ <b>Access Denied:</b> Your Telegram Chat ID (<code>%s</code>) is not authorized on this VPS.", chat_id_str);
+                        telegram_bot_send_message(bot, chat_id_str, warn);
+                        continue;
+                    }
+
+                    bot->last_activity_time = time(NULL);
 
                 snprintf(prompt_ctx.current_chat_id, sizeof(prompt_ctx.current_chat_id), "%s", chat_id_str);
 
@@ -414,14 +449,18 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                 if (strcmp(text, "/start") == 0 || strcmp(text, "/help") == 0) {
                     char welcome[8192];
                     snprintf(welcome, sizeof(welcome),
-                        "🤖 <b>BelyaHarness Autonomous VPS Agent Online (Evolution 4.0)</b>\n\n"
+                        "💎 <b>Almaz Autonomous Software Organism Online (v0.2.0-organism)</b>\n\n"
                         "<b>Active Model:</b> <code>%s</code>\n"
                         "<b>CWD:</b> <code>%s</code>\n"
-                        "<b>Context Messages:</b> <code>%zu (%zu estimated tokens)</code>\n\n"
+                        "<b>Context Messages:</b> <code>%zu (%zu estimated tokens)</code>\n"
+                        "<b>Lifetime Turns:</b> <code>%zu</code> | <b>RSS:</b> <code>%.2f MB</code>\n\n"
                         "<b>Commands:</b>\n"
-                        "/status - System status & token budget\n"
+                        "/status - System status, affective state & lifetime telemetry\n"
+                        "/goals - Intrinsic deterministic goal engine status\n"
+                        "/cycle - Trigger manual autonomic subconscious cycle\n"
+                        "/selfmodel - Introspect persistent SARSI self-model\n"
                         "/cache - Prompt cache economics & hit rates\n"
-                        "/tools - List registered VPS tools\n"
+                        "/tools - List registered organism tools\n"
                         "/agency - Multi-agent orchestration pipeline\n"
                         "/skills - Search or inspect procedural skills\n"
                         "/checkpoint - Create Git & memory checkpoint\n"
@@ -433,7 +472,8 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                         "/compact - Compact older turns\n\n"
                         "Send any instructions directly to start autonomous execution!",
                         harness->agent->gateway->model, harness->cwd,
-                        harness->agent->msg_count, belya_agent_total_tokens(harness->agent));
+                        harness->agent->msg_count, belya_agent_total_tokens(harness->agent),
+                        harness->agent->lifetime_turns, belya_get_current_rss_mb());
                     telegram_bot_send_message(bot, chat_id_str, welcome);
                     continue;
                 }
@@ -442,18 +482,30 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                     size_t total_p = harness->agent->total_prompt_tokens;
                     size_t total_c = harness->agent->total_cached_tokens;
                     double hit_rate = (total_p > 0) ? ((double)total_c / (double)total_p * 100.0) : 0.0;
+                    size_t total_t = harness->agent->lifetime_tool_calls;
+                    double tool_sr = total_t > 0 ? ((double)harness->agent->lifetime_successes / (double)total_t * 100.0) : 100.0;
                     char status_msg[8192];
                     snprintf(status_msg, sizeof(status_msg),
-                        "📊 <b>System Status (Evolution 4.0)</b>\n"
+                        "📊 <b>Almaz Organism Status (v0.2.0-organism)</b>\n"
                         "• Model: <code>%s</code>\n"
                         "• CWD: <code>%s</code>\n"
-                        "• Memory Table: <code>%s</code>\n"
+                        "• Memory Engine: <code>%s</code>\n"
                         "• Context: <code>%zu messages (%zu estimated tokens)</code>\n"
+                        "• Active RSS: <code>%.2f MB</code>\n"
+                        "• Lifetime Turns: <code>%zu</code>\n"
+                        "• Lifetime Tool Calls: <code>%zu</code> (Success: <code>%.1f%% [%zu/%zu]</code>)\n"
+                        "• Affective State: Confidence: <code>%.2f</code> | Frustration: <code>%.2f</code>\n"
+                        "• Autonomic Cycles Today: <code>%d / 3</code>\n"
                         "• Prompt Caching: <code>%s</code>\n"
                         "• Cache Hit Rate: <code>%.2f%% (%zu / %zu tokens)</code>",
                         harness->agent->gateway->model, harness->cwd,
                         harness->agent->has_fts5 ? "SQLite FTS5 + Salience Ranking" : "Standard SQLite",
                         harness->agent->msg_count, belya_agent_total_tokens(harness->agent),
+                        belya_get_current_rss_mb(),
+                        harness->agent->lifetime_turns,
+                        total_t, tool_sr, harness->agent->lifetime_successes, total_t,
+                        (double)harness->agent->confidence, (double)harness->agent->frustration,
+                        bot->autonomic_cycles_today,
                         harness->agent->gateway->prompt_caching ? "Enabled" : "Disabled",
                         hit_rate, total_c, total_p);
                     telegram_bot_send_message(bot, chat_id_str, status_msg);
@@ -558,6 +610,71 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                     char *ref = belya_agent_reflect_and_distill(harness->agent);
                     telegram_bot_send_chunks(bot, chat_id_str, ref);
                     free(ref);
+                    continue;
+                }
+
+                if (strcmp(text, "/goals") == 0) {
+                    sqlite3_stmt *g_stmt = NULL;
+                    const char *g_sql = "SELECT id, goal, category, priority, status, result_summary FROM agent_goals ORDER BY id DESC LIMIT 10;";
+                    DynString g_ds = dyn_str_new();
+                    dyn_str_append(&g_ds, "🎯 <b>Almaz Intrinsic Goals:</b>\n\n");
+                    if (harness->agent->db && sqlite3_prepare_v2(harness->agent->db, g_sql, -1, &g_stmt, NULL) == SQLITE_OK) {
+                        int g_cnt = 0;
+                        while (sqlite3_step(g_stmt) == SQLITE_ROW) {
+                            g_cnt++;
+                            int gid = sqlite3_column_int(g_stmt, 0);
+                            const char *gn = (const char *)sqlite3_column_text(g_stmt, 1);
+                            const char *gc = (const char *)sqlite3_column_text(g_stmt, 2);
+                            int gp = sqlite3_column_int(g_stmt, 3);
+                            const char *gs = (const char *)sqlite3_column_text(g_stmt, 4);
+                            const char *gr = (const char *)sqlite3_column_text(g_stmt, 5);
+                            dyn_str_appendf(&g_ds, "%s <b>#%d [%s]</b>: <code>%s</code> (P:%d)\n",
+                                (gs && strcmp(gs, "completed") == 0) ? "✅" : "⏳",
+                                gid, gc ? gc : "GENERAL", gn ? gn : "", gp);
+                            if (gr && strlen(gr) > 0) {
+                                dyn_str_appendf(&g_ds, "   <i>Result: %.120s</i>\n", gr);
+                            }
+                        }
+                        sqlite3_finalize(g_stmt);
+                        if (g_cnt == 0) dyn_str_append(&g_ds, "No intrinsic goals recorded yet. Run /cycle to trigger autonomic maintenance.");
+                    } else {
+                        dyn_str_append(&g_ds, "Failed to query agent_goals table.");
+                    }
+                    telegram_bot_send_chunks(bot, chat_id_str, g_ds.data);
+                    dyn_str_free(&g_ds);
+                    continue;
+                }
+
+                if (strcmp(text, "/cycle") == 0) {
+                    telegram_bot_send_message(bot, chat_id_str, "🌀 <i>Initiating manual autonomic subconscious cognition cycle...</i>");
+                    char *alert = NULL;
+                    almaz_autonomic_cognition_cycle(harness, &alert);
+                    char cmsg[512];
+                    snprintf(cmsg, sizeof(cmsg),
+                        "✅ <b>Autonomic Subconscious Cycle Complete</b>\n"
+                        "• Turns: <code>%zu</code> (Lifetime: <code>%zu</code>)\n"
+                        "• Active RSS: <code>%.2f MB</code>\n"
+                        "• Confidence: <code>%.2f</code> | Frustration: <code>%.2f</code>\n"
+                        "• Goal processed: Check /goals",
+                        harness->agent->turn_count, harness->agent->lifetime_turns,
+                        belya_get_current_rss_mb(),
+                        (double)harness->agent->confidence, (double)harness->agent->frustration);
+                    telegram_bot_send_message(bot, chat_id_str, cmsg);
+                    if (alert) {
+                        telegram_bot_send_message(bot, chat_id_str, alert);
+                        free(alert);
+                    }
+                    continue;
+                }
+
+                if (strcmp(text, "/selfmodel") == 0) {
+                    char *sm = almaz_agent_get_self_model(harness->agent);
+                    if (sm) {
+                        telegram_bot_send_chunks(bot, chat_id_str, sm);
+                        free(sm);
+                    } else {
+                        telegram_bot_send_message(bot, chat_id_str, "Self-model record unavailable.");
+                    }
                     continue;
                 }
 
@@ -785,10 +902,10 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                 }
 
             }
-
         }
-        json_free(resp);
     }
+    json_free(resp);
+}
 
     printf("\033[1;33m[Telegram Bot] Service shutting down gracefully.\033[0m\n");
 }

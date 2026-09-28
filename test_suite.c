@@ -2067,6 +2067,67 @@ static void test_knowself_memory_gating(void) {
     printf("  -> KnowSelf Situational Memory Gating PASSED\n");
 }
 
+static void test_autonomic_subconscious_and_goals(void) {
+    printf("[Test] Autonomic Subconscious Idle Loop & Intrinsic Goals...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Verify agent_goals table exists
+    sqlite3_stmt *stmt = NULL;
+    assert(sqlite3_prepare_v2(agent->db, "SELECT COUNT(*) FROM agent_goals;", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    int initial_goals = sqlite3_column_int(stmt, 0);
+    assert(initial_goals == 0);
+    sqlite3_finalize(stmt);
+
+    // 2. Add custom goals and test duplicate rejection
+    assert(almaz_goals_add(agent->db, "custom_audit", "CODE_AUDIT", 90, "Audit critical subsystem"));
+    assert(almaz_goals_add(agent->db, "custom_audit", "CODE_AUDIT", 90, "Duplicate should be no-op"));
+
+    assert(sqlite3_prepare_v2(agent->db, "SELECT COUNT(*) FROM agent_goals WHERE goal = 'custom_audit';", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    // 3. Test deterministic goal generation
+    almaz_goals_generate_deterministic(h);
+    assert(sqlite3_prepare_v2(agent->db, "SELECT COUNT(*) FROM agent_goals WHERE status = 'pending';", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    int pending_goals = sqlite3_column_int(stmt, 0);
+    assert(pending_goals >= 2); // At least refresh_self_model, verify_workspace_integrity, and custom_audit
+    sqlite3_finalize(stmt);
+
+    // 4. Test processing highest-priority goal
+    char *summary = NULL;
+    assert(almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strlen(summary) > 0);
+    free(summary);
+
+    // 5. Test autonomic cognition cycle
+    char *alert = NULL;
+    assert(almaz_autonomic_cognition_cycle(h, &alert));
+    if (alert) free(alert);
+
+    // Verify timeline recorded the autonomic cycle
+    assert(sqlite3_prepare_v2(agent->db, "SELECT COUNT(*) FROM agent_timeline WHERE event_type = 'autonomic_cycle';", -1, &stmt, NULL) == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) >= 1);
+    sqlite3_finalize(stmt);
+
+    // 6. Test telegram bot autonomic tracking initialization
+    TelegramBot *bot = telegram_bot_init("fake_token", "12345");
+    assert(bot != NULL);
+    assert(bot->autonomic_cycles_today == 0);
+    assert(bot->last_autonomic_time == 0);
+    assert(bot->last_activity_time > 0);
+    telegram_bot_free(bot);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    printf("  -> Autonomic Subconscious & Intrinsic Goals PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2106,6 +2167,7 @@ int main(void) {
     test_self_model_lifecycle();
     test_emotional_appraisal();
     test_knowself_memory_gating();
-    printf("================ All Tests Passed Successfully (37/37 - 100%%) ================\n\n");
+    test_autonomic_subconscious_and_goals();
+    printf("================ All Tests Passed Successfully (38/38 - 100%%) ================\n\n");
     return 0;
 }

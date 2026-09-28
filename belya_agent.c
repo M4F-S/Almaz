@@ -148,6 +148,17 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
             "  performance_stats TEXT,"
             "  active INTEGER DEFAULT 1,"
             "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE TABLE IF NOT EXISTS agent_goals ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  goal TEXT NOT NULL,"
+            "  category TEXT NOT NULL,"
+            "  priority INTEGER DEFAULT 50,"
+            "  status TEXT DEFAULT 'pending',"
+            "  rationale TEXT,"
+            "  result_summary TEXT,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "  completed_at DATETIME"
             ");";
         sqlite3_exec(agent->db, schema_sql, 0, 0, 0);
 

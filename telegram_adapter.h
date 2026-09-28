@@ -8,6 +8,10 @@ typedef struct {
     char *allowed_chat_id;
     long last_update_id;
     bool running;
+    time_t last_activity_time;
+    int autonomic_cycles_today;
+    time_t last_autonomic_time;
+    int last_autonomic_day;
 } TelegramBot;
 
 TelegramBot *telegram_bot_init(const char *bot_token, const char *allowed_chat_id);
