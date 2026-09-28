@@ -66,6 +66,7 @@ static bool telegram_is_authorized(TelegramBot *bot, const char *chat_id) {
 
     // Check exact match or comma-separated list
     char *list_copy = strdup(bot->allowed_chat_id);
+    if (!list_copy) return false;
     char *token = strtok(list_copy, ", ");
     bool authorized = false;
 
