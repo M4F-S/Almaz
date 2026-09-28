@@ -26,6 +26,7 @@ typedef struct {
     int mem_alerted;
     int gw_alerted;
     int tg_alerted;
+    int budget_alerted;
 } HealthWatcher;
 
 void health_watcher_init(HealthWatcher *hw);

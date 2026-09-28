@@ -267,4 +267,26 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, "telegram poll recovered");
         }
     }
+
+    /* 6. Daily budget sealed (intentional stop, not a gateway failure) */
+    if (gateway && gateway->budget_tripped && budget_state_day_is_today(&gateway->budget_state)) {
+        if (!hw->budget_alerted) {
+            snprintf(summary, sizeof(summary),
+                     "daily budget sealed: %ld tokens, %ld calls used",
+                     gateway->budget_state.tokens_used, gateway->budget_state.calls);
+            log_timeline(agent, summary);
+            char alert[512];
+            snprintf(alert, sizeof(alert),
+                     "⛔ *[Almaz Budget Breaker]* Daily budget sealed: %ld tokens, %ld calls. "
+                     "LLM calls paused until UTC midnight.", gateway->budget_state.tokens_used, gateway->budget_state.calls);
+            send_alert(hw, bot, alert);
+            hw->budget_alerted = 1;
+            enqueue_health_goal(agent, "daily budget sealed");
+        }
+    } else if (gateway && !gateway->budget_tripped) {
+        if (hw->budget_alerted) {
+            hw->budget_alerted = 0;
+            log_timeline(agent, "daily budget reset");
+        }
+    }
 }

@@ -2219,6 +2219,89 @@ static void test_health_watcher(void) {
     printf("  -> Health Watcher PASSED\n");
 }
 
+static void test_budget_controller(void) {
+    printf("--- Budget Controller ---\n");
+
+    /* Day string is UTC YYYY-MM-DD */
+    BudgetState bs;
+    budget_state_reset_day(&bs);
+    assert(strlen(bs.day) == 10);
+    assert(bs.day[4] == '-' && bs.day[7] == '-');
+    assert(bs.tokens_used == 0 && bs.calls == 0 && bs.cost_used == 0.0 && bs.runtime_sec == 0);
+    assert(budget_state_day_is_today(&bs));
+
+    /* Token cap respected */
+    BudgetLimits lim = {0};
+    lim.daily_tokens = 100;
+    bool sealed = false;
+    assert(budget_state_consume(&bs, &lim, 40, 10, 0, 1, &sealed) == true);
+    assert(!sealed);
+    assert(bs.tokens_used == 50 && bs.calls == 1 && bs.runtime_sec == 1);
+    /* Over the cap -> refused + sealed */
+    sealed = false;
+    assert(budget_state_consume(&bs, &lim, 90, 10, 0, 1, &sealed) == false);
+    assert(sealed);
+    assert(bs.tokens_used == 50); /* unchanged */
+    /* Exactly at cap -> accepted then sealed */
+    BudgetState bs2;
+    budget_state_reset_day(&bs2);
+    sealed = false;
+    assert(budget_state_consume(&bs2, &lim, 60, 40, 0, 1, &sealed) == true);
+    assert(sealed);
+
+    /* Cost cap */
+    BudgetState bs3;
+    budget_state_reset_day(&bs3);
+    BudgetLimits lim3 = {0};
+    lim3.daily_cost = 1.0;
+    lim3.in_rate_per_m = 100.0; /* $100 per 1M input */
+    lim3.out_rate_per_m = 0.0;
+    sealed = false;
+    assert(budget_state_consume(&bs3, &lim3, 1000, 0, 0, 1, &sealed) == true); /* $0.10 */
+    assert(bs3.cost_used > 0.099 && bs3.cost_used < 0.101);
+    assert(budget_state_consume(&bs3, &lim3, 10000, 0, 0, 1, &sealed) == false); /* would be $1.10 */
+    assert(sealed);
+
+    /* Time cap */
+    BudgetState bs4;
+    budget_state_reset_day(&bs4);
+    BudgetLimits lim4 = {0};
+    lim4.daily_seconds = 10;
+    sealed = false;
+    assert(budget_state_consume(&bs4, &lim4, 1, 1, 0, 9, &sealed) == true);
+    assert(budget_state_consume(&bs4, &lim4, 1, 1, 0, 2, &sealed) == false);
+
+    /* Stale day rolls over */
+    BudgetState bs5;
+    budget_state_reset_day(&bs5);
+    snprintf(bs5.day, sizeof(bs5.day), "2000-01-01");
+    bs5.tokens_used = 999999;
+    BudgetLimits lim5 = {0};
+    lim5.daily_tokens = 100;
+    sealed = false;
+    assert(budget_state_consume(&bs5, &lim5, 10, 10, 0, 1, &sealed) == true);
+    assert(bs5.tokens_used == 20 && bs5.calls == 1);
+    assert(budget_state_day_is_today(&bs5));
+
+    /* File round-trip */
+    BudgetState bs6;
+    budget_state_reset_day(&bs6);
+    bs6.tokens_used = 4242;
+    bs6.calls = 7;
+    bs6.cost_used = 0.123456;
+    bs6.runtime_sec = 66;
+    assert(budget_state_save("/tmp/almaz_budget_test.txt", &bs6) == 0);
+    BudgetState bs7;
+    memset(&bs7, 0, sizeof(bs7));
+    assert(budget_state_load("/tmp/almaz_budget_test.txt", &bs7) == 0);
+    assert(strcmp(bs7.day, bs6.day) == 0);
+    assert(bs7.tokens_used == 4242 && bs7.calls == 7 && bs7.runtime_sec == 66);
+    assert(bs7.cost_used > 0.123 && bs7.cost_used < 0.124);
+    unlink("/tmp/almaz_budget_test.txt");
+
+    printf("  -> Budget Controller PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2260,6 +2343,7 @@ int main(void) {
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
     test_health_watcher();
-    printf("================ All Tests Passed Successfully (39/39 - 100%%) ================\n\n");
+    test_budget_controller();
+    printf("================ All Tests Passed Successfully (40/40 - 100%%) ================\n\n");
     return 0;
 }

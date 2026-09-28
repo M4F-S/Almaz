@@ -481,15 +481,42 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
     return res;
 }
 
-/* Gateway wrapper: tracks consecutive_failures for the health watcher.
- * Success = tool call present OR content that is not an error/empty message. */
+/* Gateway wrapper: tracks consecutive_failures for the health watcher and
+ * enforces the daily budget circuit breaker (Week-4). Success = tool call
+ * present OR content that is not an error/empty message. */
 static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
     if (!self) {
         ModelGatewayResponse r = {0};
         r.content = strdup("Error: gateway not initialized.");
         return r;
     }
+
+    /* Budget pre-check: sealed for today -> refuse without touching the
+     * failure counter (this is an intentional stop, not a gateway failure). */
+    if (self->budget_tripped && budget_state_day_is_today(&self->budget_state)) {
+        ModelGatewayResponse r = {0};
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "BudgetExceeded: daily budget sealed (%ld tokens, %ld calls). Resumes at UTC midnight.",
+                 self->budget_state.tokens_used, self->budget_state.calls);
+        r.content = strdup(msg);
+        return r;
+    }
+    self->budget_tripped = false; /* stale from a previous day */
+
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long duration_sec = (long)(t1.tv_sec - t0.tv_sec);
+
+    bool sealed = false;
+    budget_state_consume(&self->budget_state, &self->budget_limits,
+                         (long)res.prompt_tokens, (long)res.completion_tokens,
+                         (long)res.cached_tokens, duration_sec, &sealed);
+    if (sealed) self->budget_tripped = true;
+    budget_state_save(self->budget_path, &self->budget_state);
+
     bool ok = res.has_tool_call ||
               (res.content && strncmp(res.content, "Error:", 6) != 0 &&
                strncmp(res.content, "API Error", 9) != 0 &&
@@ -748,6 +775,14 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     gw->timeout_sec = 120;
     gw->max_retries = 3;
     gw->streaming = true;
+    budget_limits_from_env(&gw->budget_limits);
+    snprintf(gw->budget_path, sizeof(gw->budget_path), "%s", "budget_state.txt");
+    if (budget_state_load(gw->budget_path, &gw->budget_state) != 0) {
+        BudgetState fresh;
+        budget_state_reset_day(&fresh);
+        gw->budget_state = fresh;
+    }
+    gw->budget_tripped = false;
     const char *pc_env = getenv("PROMPT_CACHING");
     if (pc_env && (strcmp(pc_env, "true") == 0 || strcmp(pc_env, "1") == 0)) {
         gw->prompt_caching = true;

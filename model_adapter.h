@@ -1,6 +1,10 @@
 #ifndef MODEL_ADAPTER_H
 #define MODEL_ADAPTER_H
 
+#include <stdbool.h>
+#include <stddef.h>
+#include "budget_store.h"
+
 #include "common.h"
 #include "minijson.h"
 
@@ -33,6 +37,10 @@ typedef struct ModelGateway {
     int consecutive_failures; // health watcher counter: reset on success, ++ on failure
     bool streaming;
     bool prompt_caching;
+    bool budget_tripped; // daily budget sealed (resets at UTC midnight on next call)
+    BudgetLimits budget_limits;
+    BudgetState budget_state;
+    char budget_path[256];
     TokenStreamCallback stream_cb;
     void *stream_userdata;
     void *curl_handle; // Persistent CURL handle for HTTP Keep-Alive
