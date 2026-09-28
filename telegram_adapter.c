@@ -1,4 +1,5 @@
 #include "telegram_adapter.h"
+#include "health_watcher.h"
 #include <curl/curl.h>
 #include <signal.h>
 #include <time.h>
@@ -100,6 +101,7 @@ TelegramBot *telegram_bot_init(const char *bot_token, const char *allowed_chat_i
     bot->autonomic_cycles_today = 0;
     bot->last_autonomic_time = 0;
     bot->last_autonomic_day = -1;
+    bot->consecutive_poll_failures = 0;
     return bot;
 }
 
@@ -378,8 +380,18 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
         json_free(poll_p);
 
         if (!resp) {
+            bot->consecutive_poll_failures++;
             sleep(2); // Network sleep
             continue;
+        }
+        bot->consecutive_poll_failures = 0;
+
+        /* In-daemon health watcher (Week-2 autonomy): throttled internally to 60s */
+        static HealthWatcher s_health_watcher = {0};
+        time_t hw_now = time(NULL);
+        if (hw_now - s_health_watcher.last_check_time >= 60) {
+            health_watcher_run(&s_health_watcher, harness->agent,
+                               harness->agent ? harness->agent->gateway : NULL, bot);
         }
 
         JsonValue *updates = json_obj_get(resp, "result");

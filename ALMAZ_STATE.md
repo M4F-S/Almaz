@@ -48,7 +48,7 @@ Almaz is **not a passive chat assistant**. It is a **continuous, self-evolving, 
 - **Memory Safety:** 100% verified allocation guards (**63/63 dynamic allocations checked for NULL**).
 - **String Safety:** 0 unbounded legacy string calls (`gets`, `strcpy`, `strcat` eliminated; bounded `strncpy` and bounded `memcpy` enforced).
 - **Sanitizer Cleanliness:**
-  - **38/38 Unit Tests Passed (100%)** under Clang/GCC AddressSanitizer and UndefinedBehaviorSanitizer.
+  - **38/38 Unit Tests Passed (100%)** under Clang/GCC AddressSanitizer and UndefinedBehaviorSanitizer. *(== 39/39 with health watcher tests, 2026-09-28)*
   - **52/52 Hidden Holdout Assertions Passed (100%)** under AddressSanitizer and UndefinedBehaviorSanitizer.
 - **Darwinian Evolution & Novelty Gating:**
   - **6/6 Novelty Gate Tests Passed (100%)** in `tools/test_novelty_gate.py`.

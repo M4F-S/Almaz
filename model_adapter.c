@@ -179,7 +179,7 @@ static size_t curl_sink_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     return total;
 }
 
-static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
+static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
     ModelGatewayResponse res = {0};
 
     JsonValue *payload = json_create_object();
@@ -478,6 +478,26 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
 
     free(json_body);
     res.content = strdup("Error: Maximum retry attempts exceeded.");
+    return res;
+}
+
+/* Gateway wrapper: tracks consecutive_failures for the health watcher.
+ * Success = tool call present OR content that is not an error/empty message. */
+static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
+    if (!self) {
+        ModelGatewayResponse r = {0};
+        r.content = strdup("Error: gateway not initialized.");
+        return r;
+    }
+    ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema);
+    bool ok = res.has_tool_call ||
+              (res.content && strncmp(res.content, "Error:", 6) != 0 &&
+               strncmp(res.content, "API Error", 9) != 0 &&
+               strncmp(res.content, "Network Error", 13) != 0 &&
+               strncmp(res.content, "Empty model response", 20) != 0 &&
+               strncmp(res.content, "Connection Error", 16) != 0);
+    if (self->consecutive_failures < 0) self->consecutive_failures = 0;
+    self->consecutive_failures = ok ? 0 : (self->consecutive_failures + 1);
     return res;
 }
 

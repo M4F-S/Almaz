@@ -1,6 +1,7 @@
 #include "belya_harness.h"
 #include "telegram_adapter.h"
 #include "minifrontmatter.h"
+#include "health_watcher.h"
 #include <assert.h>
 #include <unistd.h>
 
@@ -2128,6 +2129,85 @@ static void test_autonomic_subconscious_and_goals(void) {
     printf("  -> Autonomic Subconscious & Intrinsic Goals PASSED\n");
 }
 
+static void test_health_watcher(void) {
+    printf("--- Health Watcher ---\n");
+
+    /* Pure RSS parser */
+    assert(health_watcher_parse_rss_kb("VmRSS:\t 16384 kB\n") == 16384);
+    assert(health_watcher_parse_rss_kb("VmRSS:\t 16.2 MB\n") == -1);
+    assert(health_watcher_parse_rss_kb("") == -1);
+    assert(health_watcher_parse_rss_kb(NULL) == -1);
+
+    /* Disk free sanity on cwd */
+    int free_pct = health_watcher_disk_free_pct(".");
+    assert(free_pct >= 0 && free_pct <= 100);
+    assert(health_watcher_disk_free_pct("/nonexistent-path-xyz") == -1);
+
+    /* Full run against an in-memory agent (no Telegram -> no network side effects) */
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    assert(gw != NULL);
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Health watcher test");
+    assert(agent != NULL);
+
+    HealthWatcher hw;
+    health_watcher_init(&hw);
+
+    /* Healthy state: no gateway alert, sqlite checked */
+    gw->consecutive_failures = 0;
+    health_watcher_run(&hw, agent, gw, NULL);
+    assert(hw.gw_alerted == 0);
+    assert(hw.last_sqlite_check_time > 0);
+
+    /* Gateway streak -> one alert + exactly one timeline entry */
+    int before = -1;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_timeline WHERE event_type='health_watcher';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        before = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    assert(before >= 0);
+
+    gw->consecutive_failures = 5;
+    hw.last_check_time = 0;
+    health_watcher_run(&hw, agent, gw, NULL);
+    assert(hw.gw_alerted == 1);
+
+    int after = -1;
+    stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_timeline WHERE event_type='health_watcher';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        after = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    assert(after == before + 1);
+
+    /* Cooldown: same streak again -> no duplicate timeline entry */
+    hw.last_check_time = 0;
+    health_watcher_run(&hw, agent, gw, NULL);
+    int after2 = -1;
+    stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db,
+                           "SELECT COUNT(*) FROM agent_timeline WHERE event_type='health_watcher';",
+                           -1, &stmt, NULL) == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        after2 = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    assert(after2 == after);
+
+    /* Recovery clears the flag */
+    gw->consecutive_failures = 2;
+    hw.last_check_time = 0;
+    health_watcher_run(&hw, agent, gw, NULL);
+    assert(hw.gw_alerted == 0);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    printf("  -> Health Watcher PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2168,6 +2248,7 @@ int main(void) {
     test_emotional_appraisal();
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
-    printf("================ All Tests Passed Successfully (38/38 - 100%%) ================\n\n");
+    test_health_watcher();
+    printf("================ All Tests Passed Successfully (39/39 - 100%%) ================\n\n");
     return 0;
 }

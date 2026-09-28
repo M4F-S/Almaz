@@ -12,6 +12,7 @@ typedef struct {
     int autonomic_cycles_today;
     time_t last_autonomic_time;
     int last_autonomic_day;
+    int consecutive_poll_failures; // health watcher counter
 } TelegramBot;
 
 TelegramBot *telegram_bot_init(const char *bot_token, const char *allowed_chat_id);
