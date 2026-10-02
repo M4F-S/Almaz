@@ -10,7 +10,7 @@ WORKSPACE=/opt/almaz
 TODAY=$(date -u +%Y-%m-%d)
 
 echo "[auto_promote] scanning for mutation tags created today..."
-LATEST_TAG=$(git -C "$WORKSPACE" tag --list 'evolve/almaz/*' --sort=-creatordate | head -1 || true)
+LATEST_TAG=$(git -C "$WORKSPACE" tag --list 'evo-v*' --sort=-creatordate | head -1 || true)
 if [ -z "$LATEST_TAG" ]; then
   echo "[auto_promote] no mutation tags found; nothing to promote"
   exit 0
@@ -32,4 +32,6 @@ trap 'git -C "$WORKSPACE" worktree remove -f "$WT" 2>/dev/null || rm -rf "$WT"' 
 
 cp -a "$WT/almaz" "$WORKSPACE/almaz.B"
 chmod +x "$WORKSPACE/almaz.B"
-bash "$WORKSPACE/promote.sh" "$WORKSPACE/almaz.B"
+PROMOTE_SH=$(dirname "$0")/promote.sh
+[ -x "$PROMOTE_SH" ] || PROMOTE_SH="$WORKSPACE/tools/promote.sh"
+bash "$PROMOTE_SH" "$WORKSPACE/almaz.B"

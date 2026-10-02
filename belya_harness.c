@@ -115,20 +115,31 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     const char *cmd = json_obj_get_str(args, "command");
     if (!cmd) return strdup("Error: Missing command argument.");
 
-    // Tester Restricted Execution Guard: allow only test and build commands
+    // Tester Restricted Execution Guard: allow only build/test/read/verify targets.
+    // M8 fix (same as Belya H3): reject shell metacharacters, then exact argv[0].
     if (g_harness && g_harness->bash_restricted) {
         const char *t = cmd;
         while (*t == ' ' || *t == '\t') t++;
         bool allowed = false;
-        const char *allowed_cmds[] = {
-            "make", "./belya_test", "gcc", "clang", "ctest", "git status", "git diff", "cat ", "ls", "pwd", "echo", NULL
-        };
-        for (int i = 0; allowed_cmds[i]; i++) {
-            if (strncmp(t, allowed_cmds[i], strlen(allowed_cmds[i])) == 0 ||
-                strstr(t, "make test") != NULL ||
-                strstr(t, "./belya_test") != NULL) {
-                allowed = true;
-                break;
+        if (strpbrk(t, ";|&$`\\<>(){}") == NULL && strchr(t, '\n') == NULL) {
+            static const char *allowed_cmds[] = {
+                "make", "./belya_test", "./almaz_test", "gcc", "clang", "ctest",
+                "git", "cat", "ls", "pwd", "echo", "grep", "find", "wc", "diff",
+                "head", "tail", "sort", "uniq", "md5sum", "sha256sum", "file", "stat",
+                NULL
+            };
+            char first[128];
+            size_t n = 0;
+            while (t[n] && !isspace((unsigned char)t[n]) && n < sizeof(first) - 1) {
+                first[n] = t[n];
+                n++;
+            }
+            first[n] = '\0';
+            for (int i = 0; allowed_cmds[i]; i++) {
+                if (strcmp(first, allowed_cmds[i]) == 0) {
+                    allowed = true;
+                    break;
+                }
             }
         }
         if (!allowed) {

@@ -24,6 +24,7 @@ typedef struct {
     long calls;
     double cost_used;
     long runtime_sec;
+    int sealed;             /* H1: 1 once any cap has been hit for this day */
 } BudgetState;
 
 /* Fill limits from environment (MODEL_BUDGET_DAILY_TOKENS / _COST / _SECONDS,

@@ -45,3 +45,8 @@ budget_state.txt
 *.rollback
 almaz_crashes.log
 *.tmp
+almaz.prev
+promote.sh
+almaz.B
+almaz.bak
+almaz.lkg

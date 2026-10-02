@@ -7,7 +7,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/almaz
 EnvironmentFile=/opt/almaz/.env
-ExecStartPre=/opt/almaz/safety_check.sh
+ExecStartPre=/usr/local/libexec/almaz/safety_check.sh
 ExecStart=/opt/almaz/almaz-watchdog --telegram
 Restart=always
 RestartSec=5s
@@ -16,6 +16,15 @@ RestartSec=5s
 LimitNOFILE=65536
 KillMode=process
 TimeoutStopSec=10s
+
+# H7: parity with belya.service; keep /opt/almaz writable for deploy state,
+# crash log, budget and the worktree the agent mutates.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/almaz
+NoNewPrivileges=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

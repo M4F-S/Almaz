@@ -193,6 +193,10 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
     }
     if (self->streaming) {
         json_obj_add(payload, "stream", json_create_bool(true));
+        /* H2: request usage in SSE chunks so the budget meter actually counts. */
+        JsonValue *stream_opts = json_create_object();
+        json_obj_add(stream_opts, "include_usage", json_create_bool(true));
+        json_obj_add(payload, "stream_options", stream_opts);
     }
 
     char *json_body = json_serialize(payload);
@@ -780,13 +784,15 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     gw->max_retries = 3;
     gw->streaming = true;
     budget_limits_from_env(&gw->budget_limits);
-    snprintf(gw->budget_path, sizeof(gw->budget_path), "%s", "budget_state.txt");
+    const char *bp = getenv("BUDGET_PATH");
+    snprintf(gw->budget_path, sizeof(gw->budget_path), "%s", (bp && bp[0]) ? bp : "budget_state.txt");
     if (budget_state_load(gw->budget_path, &gw->budget_state) != 0) {
         BudgetState fresh;
         budget_state_reset_day(&fresh);
         gw->budget_state = fresh;
     }
-    gw->budget_tripped = false;
+    /* H1: a previously persisted SEALED state must survive restarts. */
+    gw->budget_tripped = gw->budget_state.sealed;
     const char *pc_env = getenv("PROMPT_CACHING");
     if (pc_env && (strcmp(pc_env, "true") == 0 || strcmp(pc_env, "1") == 0)) {
         gw->prompt_caching = true;

@@ -2258,11 +2258,12 @@ static void test_budget_controller(void) {
     assert(budget_state_consume(&bs, &lim, 40, 10, 0, 1, &sealed) == true);
     assert(!sealed);
     assert(bs.tokens_used == 50 && bs.calls == 1 && bs.runtime_sec == 1);
-    /* Over the cap -> refused + sealed */
+    /* Over the cap -> refused (next call blocked) + sealed; H1: the call that
+       tripped the cap has ALREADY happened, so its usage is counted. */
     sealed = false;
     assert(budget_state_consume(&bs, &lim, 90, 10, 0, 1, &sealed) == false);
     assert(sealed);
-    assert(bs.tokens_used == 50); /* unchanged */
+    assert(bs.tokens_used == 150 && bs.calls == 2 && bs.sealed == 1); /* 50 + 100 spent */
     /* Exactly at cap -> accepted then sealed */
     BudgetState bs2;
     budget_state_reset_day(&bs2);
@@ -2393,8 +2394,11 @@ static void test_timeline_anomaly(void) {
     sqlite3_finalize(s);
     assert(goals == 1);
 
-    /* Re-scan: anomaly persists but goal stays deduped (still 1) */
-    assert(timeline_anomaly_scan(agent) >= 1);
+    /* Re-scan: the anomaly persists but is deduped for today (H5 fix — the
+       old per-type log gate never matched, so every scan re-logged the
+       feedback loop that P0-3 was meant to kill). Expect 0 NEW anomalies and
+       the goal count unchanged. */
+    assert(timeline_anomaly_scan(agent) == 0);
     s = NULL;
     if (sqlite3_prepare_v2(agent->db,
                            "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",
@@ -2411,7 +2415,7 @@ static void test_timeline_anomaly(void) {
 assert(sqlite3_exec(agent->db,
                     "UPDATE agent_goals SET created_at = datetime('now','-3 days') WHERE category='ANOMALY_REMEDIATION';",
                     NULL, NULL, NULL) == SQLITE_OK);
-assert(timeline_anomaly_scan(agent) >= 1);
+assert(timeline_anomaly_scan(agent) == 0); /* daily log gate already fired today -> 0 new anomalies */
 s = NULL;
 if (sqlite3_prepare_v2(agent->db,
                        "SELECT COUNT(*) FROM agent_goals WHERE category='ANOMALY_REMEDIATION' AND status='pending';",

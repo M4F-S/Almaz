@@ -12,16 +12,24 @@ static int run_selfest(void) {
     printf("[Selfest] Almaz self-test\n");
     int rc = 0;
     sqlite3 *db = NULL;
-    if (sqlite3_open("almaz_memory.sqlite", &db) != SQLITE_OK) {
+    if (sqlite3_open_v2("almaz_memory.sqlite", &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         printf("  [FAIL] sqlite open almaz_memory.sqlite: %s\n", sqlite3_errmsg(db));
         sqlite3_close(db);
         return 1;
     }
 
-    char *err = NULL;
-    int ok_int = sqlite3_exec(db, "PRAGMA integrity_check;", NULL, NULL, &err);
-    rc += selfest_check("sqlite integrity_check", ok_int == SQLITE_OK && !err);
-    sqlite3_free(err);
+    /* M1: integrity_check reports corruption as ROWS with SQLITE_OK rc —
+       step through and require exactly one row == "ok". */
+    sqlite3_stmt *ist = NULL;
+    bool integrity_ok = false;
+    if (sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &ist, NULL) == SQLITE_OK) {
+        if (sqlite3_step(ist) == SQLITE_ROW) {
+            const char *row = (const char *)sqlite3_column_text(ist, 0);
+            integrity_ok = row && strcmp(row, "ok") == 0 && sqlite3_step(ist) == SQLITE_DONE;
+        }
+    }
+    sqlite3_finalize(ist);
+    rc += selfest_check("sqlite integrity_check", integrity_ok);
 
     sqlite3_stmt *stmt = NULL;
     const char *jm = NULL;

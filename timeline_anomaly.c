@@ -28,9 +28,13 @@ static bool anomaly_logged_today(sqlite3 *db, const char *type) {
         "SELECT COUNT(*) FROM agent_timeline "
         "WHERE event_type='anomaly_detected' "
         "AND date(created_at) = date('now') "
-        "AND summary LIKE 'anomaly_detected: event_type=%.20s%';";
+        "AND summary LIKE 'anomaly_detected: event_type=' || ? || ' %';";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
-    sqlite3_bind_text(stmt, 1, type, -1, SQLITE_STATIC);
+    /* H5: the summary writer truncates the type to %.20s — the dedupe must
+       match the same truncation or it never fires for long event types. */
+    char tbuf[21];
+    snprintf(tbuf, sizeof(tbuf), "%.20s", type ? type : "");
+    sqlite3_bind_text(stmt, 1, tbuf, -1, SQLITE_STATIC);
     bool logged = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) > 0;
     sqlite3_finalize(stmt);
     return logged;

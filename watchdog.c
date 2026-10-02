@@ -78,7 +78,7 @@ static void log_crash_event(int exit_code, int term_sig) {
     /* bounded log: truncate at 1 MB (Kimi K3 P1: unbounded crash log growth) */
     struct stat st;
     if (stat("almaz_crashes.log", &st) == 0 && st.st_size > 1048576) {
-        unlink("almaz_crashes.log");
+        rename("almaz_crashes.log", "almaz_crashes.log.1");
     }
     FILE *fp = fopen("almaz_crashes.log", "a");
     if (!fp) return;

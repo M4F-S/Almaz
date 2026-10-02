@@ -35,6 +35,7 @@ void budget_state_reset_day(BudgetState *bs) {
     bs->calls = 0;
     bs->cost_used = 0.0;
     bs->runtime_sec = 0;
+    bs->sealed = 0;
 }
 
 static bool day_matches(const BudgetState *bs) {
@@ -72,6 +73,8 @@ int budget_state_load(const char *path, BudgetState *bs) {
             bs->cost_used = atof(line + 5);
         } else if (strncmp(line, "RUNTIME=", 8) == 0) {
             bs->runtime_sec = atol(line + 8);
+        } else if (strncmp(line, "SEALED=", 7) == 0) {
+            bs->sealed = atoi(line + 7) ? 1 : 0;
         }
     }
     fclose(fp);
@@ -88,8 +91,8 @@ int budget_state_save(const char *path, const BudgetState *bs) {
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
     FILE *fp = fopen(tmp, "w");
     if (!fp) return -1;
-    fprintf(fp, "DAY=%s\nTOKENS=%ld\nCALLS=%ld\nCOST=%.6f\nRUNTIME=%ld\n",
-            bs->day, bs->tokens_used, bs->calls, bs->cost_used, bs->runtime_sec);
+    fprintf(fp, "DAY=%s\nTOKENS=%ld\nCALLS=%ld\nCOST=%.6f\nRUNTIME=%ld\nSEALED=%d\n",
+            bs->day, bs->tokens_used, bs->calls, bs->cost_used, bs->runtime_sec, bs->sealed ? 1 : 0);
     fflush(fp);
     fclose(fp);
     return rename(tmp, path) == 0 ? 0 : -1;
@@ -119,6 +122,14 @@ bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
     }
 
     if (would_exceed) {
+        /* H1: the call has ALREADY been paid for — record its usage, then
+           seal. The old code returned false without counting it, so a
+           restart reopened the budget for one more call every time. */
+        bs->tokens_used += prompt_tokens + completion_tokens;
+        bs->calls += 1;
+        bs->cost_used += cost;
+        bs->runtime_sec += duration_sec;
+        bs->sealed = 1;
         if (sealed) *sealed = true;
         return false;
     }
@@ -128,8 +139,8 @@ bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
     bs->cost_used += cost;
     bs->runtime_sec += duration_sec;
 
-    if (lim->daily_tokens > 0 && bs->tokens_used >= lim->daily_tokens) *sealed = true;
-    if (lim->daily_cost > 0 && bs->cost_used >= lim->daily_cost) *sealed = true;
-    if (lim->daily_seconds > 0 && bs->runtime_sec >= lim->daily_seconds) *sealed = true;
+    if (lim->daily_tokens > 0 && bs->tokens_used >= lim->daily_tokens) { bs->sealed = 1; if (sealed) *sealed = true; }
+    if (lim->daily_cost > 0 && bs->cost_used >= lim->daily_cost) { bs->sealed = 1; if (sealed) *sealed = true; }
+    if (lim->daily_seconds > 0 && bs->runtime_sec >= lim->daily_seconds) { bs->sealed = 1; if (sealed) *sealed = true; }
     return true;
 }

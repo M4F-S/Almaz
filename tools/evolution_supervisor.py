@@ -429,11 +429,12 @@ def run_self_evolution(force_retest=False):
     # 4. Compile and test baseline under ASan with all C modules
     c_sources = [
         "test_suite.c", "linenoise.c", "minijson.c", "minifrontmatter.c", "mcp_client.c",
-        "jev_client.c", "model_adapter.c", "belya_agent.c", "belya_harness.c", "telegram_adapter.c"
+        "jev_client.c", "model_adapter.c", "belya_agent.c", "belya_harness.c", "telegram_adapter.c",
+        "budget_store.c", "health_watcher.c", "timeline_anomaly.c"
     ]
     build_base = [
         "gcc", "-Wall", "-Wextra", "-std=c99", "-fsanitize=address,undefined"
-    ] + POSIX_FLAGS + c_sources + ["-lcurl", "-lsqlite3", "-o", "test_baseline"]
+    ] + POSIX_FLAGS + c_sources + ["-lcurl", "-lsqlite3", "-lm", "-o", "test_baseline"]
 
     res_bb = subprocess.run(build_base, cwd=SANDBOX_DIR, capture_output=True, text=True)
     if res_bb.returncode != 0:
@@ -486,7 +487,7 @@ def run_self_evolution(force_retest=False):
     # 7a. Compile and test candidate under ASan
     build_cand = [
         "gcc", "-Wall", "-Wextra", "-std=c99", "-fsanitize=address,undefined"
-    ] + POSIX_FLAGS + c_sources + ["-lcurl", "-lsqlite3", "-o", "test_candidate"]
+    ] + POSIX_FLAGS + c_sources + ["-lcurl", "-lsqlite3", "-lm", "-o", "test_candidate"]
 
     res_bc = subprocess.run(build_cand, cwd=SANDBOX_DIR, capture_output=True, text=True)
     if res_bc.returncode != 0:
@@ -500,11 +501,12 @@ def run_self_evolution(force_retest=False):
     # 7b. Compile and test candidate against Hidden Holdout Suite (AIDE2 protocol)
     holdout_sources = [
         "test_holdout.c", "linenoise.c", "minijson.c", "minifrontmatter.c", "mcp_client.c",
-        "jev_client.c", "model_adapter.c", "belya_agent.c", "belya_harness.c", "telegram_adapter.c"
+        "jev_client.c", "model_adapter.c", "belya_agent.c", "belya_harness.c", "telegram_adapter.c",
+        "budget_store.c", "health_watcher.c", "timeline_anomaly.c"
     ]
     build_hold = [
         "gcc", "-Wall", "-Wextra", "-std=c99", "-fsanitize=address,undefined"
-    ] + POSIX_FLAGS + holdout_sources + ["-lcurl", "-lsqlite3", "-o", "test_holdout_bin"]
+    ] + POSIX_FLAGS + holdout_sources + ["-lcurl", "-lsqlite3", "-lm", "-o", "test_holdout_bin"]
     res_bhold = subprocess.run(build_hold, cwd=SANDBOX_DIR, capture_output=True, text=True)
     if res_bhold.returncode != 0:
         err_msg = res_bhold.stderr[:200].strip().replace("\n", " ")
@@ -532,11 +534,13 @@ def run_self_evolution(force_retest=False):
         patch_path = str(patch_file.name)
         print(f"[+] Saved accepted patch file: {patch_file.name} (SHA-256: {patch_sha256})")
 
-        # 10. Promote to workspace
-        shutil.copy(target_in_sandbox, WORKSPACE_DIR / candidate_mut["target_file"])
-        subprocess.run(["make", "-j4"], cwd=WORKSPACE_DIR, capture_output=True)
-        if (WORKSPACE_DIR / "belya").exists():
-            subprocess.run(["cp", "belya", "almaz"], cwd=WORKSPACE_DIR, capture_output=True)
+        # 10. Record the accepted patch. C3/H7 fix: do NOT write into the live
+        # workspace / rebuild / copy over the running binary here. Deployment
+        # happens only through tools/promote.sh (opt-in auto_promote loop).
+        patch_file = PATCHES_DIR / f"mutation_{timestamp}_{candidate_mut['id']}.patch"
+        patch_file.write_text(patch_text)
+        patch_path = str(patch_file.name)
+        print(f"[+] Saved accepted patch file: {patch_file.name} (SHA-256: {patch_sha256})")
 
         # 11. Automated Git Commit on current branch
         try:
@@ -722,6 +726,8 @@ def update_self_model_from_evolution(evo_result, arena_result):
         return
 
     accepted, evo_msg, speedup, patch_path, commit_sha = evo_result
+    asan_line = "PASSED" if accepted else ("NOT RUN / " + (evo_msg or "baseline"))
+    holdout_line = "52/52 (accepted candidate)" if accepted else "not run"
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     import sqlite3
@@ -742,8 +748,8 @@ def update_self_model_from_evolution(evo_result, arena_result):
                 "accepted": bool(accepted),
                 "speedup_pct": float(speedup),
                 "commit": commit_sha or "baseline",
-                "asan_clean": True,
-                "holdout_battery": "52/52 passed",
+                "asan_clean": bool(accepted),           # M6: only true when a candidate actually passed
+                "holdout_battery": ("52/52 passed" if accepted else "not run"),
                 "timestamp": now_str
             }
             cursor.execute(
@@ -782,8 +788,8 @@ def dispatch_daily_report(findings, evo_result, arena_result, healing_status, en
         f"• Performance: {evo_msg}\n"
         f"• Patch: {patch_line}\n"
         f"• Git Commit: {commit_line}\n"
-        f"• AddressSanitizer: 37/37 tests passed (0 leaks)\n"
-        f"• Hidden Holdout Battery: 52/52 assertions passed (AIDE2 protocol)\n\n"
+        f"• AddressSanitizer: {'PASSED via sandbox' if accepted else ('NOT RUN / ' + (evo_msg or 'baseline'))}\n"
+                f"• Hidden Holdout Battery: {'52/52 (accepted candidate)' if accepted else 'not run for this candidate'}\n\n"
         f"🩺 *3. Observability-Driven Self-Healing*\n"
         f"• State: {healing_status}\n\n"
         f"🏆 *4. Real Champion vs. Challenger Arena*\n"
@@ -850,7 +856,10 @@ def main():
     if os.environ.get("BELYA_AUTO_PROMOTE") == "1":
         print("[+] BELYA_AUTO_PROMOTE=1: running auto-promote hook...")
         try:
-            subprocess.run(["/opt/almaz/tools/auto_promote.sh"], timeout=1500)
+            promote_bin = "/usr/local/libexec/almaz/auto_promote.sh"
+            if not os.path.exists(promote_bin):
+                promote_bin = str(WORKSPACE_DIR / "tools" / "auto_promote.sh")
+            subprocess.run([promote_bin], timeout=1500)
         except Exception as e:
             print(f"[!] auto_promote hook failed: {e}")
     print("[+] All 5 Daily Mission Phases Completed Successfully.\n")

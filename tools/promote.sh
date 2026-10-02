@@ -35,6 +35,9 @@ fail() {
 
 [ -x "$CAND" ] || fail "candidate not executable: $CAND"
 [ -n "$ACTIVE" ] && [ -n "$LKG" ] && [ -n "$STAGING" ] || fail "deploy_state incomplete (ACTIVE=$ACTIVE LKG=$LKG STAGING=$STAGING)"
+case "$ACTIVE" in *[!A-Za-z0-9._-]*|"") fail "ACTIVE slot name invalid: $ACTIVE";; esac
+case "$LKG" in *[!A-Za-z0-9._-]*|"") fail "LKG slot name invalid: $LKG";; esac
+[ "$ACTIVE" != "$LKG" ] || fail "ACTIVE==LKG ($ACTIVE); promote cannot be safe — seed distinct slots (e.g. LKG=almaz.lkg)"
 [ -x "./$ACTIVE" ] || fail "active slot missing: $ACTIVE"
 [ -x "./$LKG" ] || fail "LKG slot missing: $LKG"
 
@@ -54,12 +57,13 @@ else
 fi
 chmod 755 "./$STAGING"
 
-echo "[promote] Promoting $STAGING -> $ACTIVE"
+echo "[promote] Promoting $STAGING -> $ACTIVE (atomic rename)"
 cp -a "./$ACTIVE" ".$ACTIVE.rollback"
-cp -a "./$STAGING" "./$ACTIVE"
+cp -a "./$STAGING" "./.almaz.new"
+mv -f "./.almaz.new" "./$ACTIVE"
 
 if ! systemctl restart almaz 2>/dev/null; then
-  cp -a ".$ACTIVE.rollback" "./$ACTIVE"
+  cp -a ".$ACTIVE.rollback" "./.almaz.new" && mv -f "./.almaz.new" "./$ACTIVE"
   fail "service restart failed; rolled back ACTIVE slot from .rollback"
 fi
 

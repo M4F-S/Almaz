@@ -2279,7 +2279,21 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
         curr_weak = strdup("[\"unbounded speculative edits without read_file\", \"deep conversational drift\"]");
     }
 
-    bool res = almaz_agent_update_self_model(agent, curr_cap, curr_weak, stats_json);
+    /* M5: update the ACTIVE row's performance_stats in place instead of
+       INSERTing a whole new self_model row every turn (the live DB had
+       grown to 876 rows). Fall back to the original insert only when no
+       active row exists yet. */
+    bool res = false;
+    sqlite3_stmt *up = NULL;
+    const char *up_sql = "UPDATE self_model SET performance_stats = ? WHERE active = 1;";
+    if (sqlite3_prepare_v2(agent->db, up_sql, -1, &up, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(up, 1, stats_json, -1, SQLITE_STATIC);
+        res = sqlite3_step(up) == SQLITE_DONE;
+        sqlite3_finalize(up);
+    }
+    if (!res) {
+        res = almaz_agent_update_self_model(agent, curr_cap, curr_weak, stats_json);
+    }
     if (curr_cap) free(curr_cap);
     if (curr_weak) free(curr_weak);
     return res;
