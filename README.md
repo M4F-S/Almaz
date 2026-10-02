@@ -37,7 +37,7 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
   - [Mode 3: Headless Batch / CI/CD Mission](#mode-3-headless-batch--cicd-mission)
   - [Mode 4: Multi-Agent Orchestration Mode](#mode-4-multi-agent-orchestration-mode)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (37/37 Passed - 100%)](#1-unit-test-suite-3737-passed---100)
+  - [1. Unit Test Suite (41/41 Passed - 100%)](#1-unit-test-suite-4141-passed---100)
   - [2. Hidden Holdout Regression Suite (52/52 Assertions - 100%)](#2-hidden-holdout-regression-suite-5252-assertions---100)
   - [3. Zero-Tolerance Memory Safety (ASan/UBSan)](#3-zero-tolerance-memory-safety-asanubsan)
 - [Configuration & Deployment (`.env`, `almaz.service`)](#configuration--deployment-env-almazservice)
@@ -141,7 +141,7 @@ To allow Darwinian self-evolution without risking catastrophic degradation or co
 Every night at 03:00 UTC, the `almaz-daily.timer` invokes `evolution_supervisor.py`:
 - Scans `belya_memory.sqlite` event timeline for tool errors, compilation failures, and frustration spikes encountered during production operations.
 - Synthesizes targeted hot-path optimizations (e.g. string routines, JSON parser throughput).
-- Runs candidate mutations in isolated sandbox jails under AddressSanitizer and validates both the 37-unit-test suite and the 52-assertion holdout suite.
+- Runs candidate mutations in isolated sandbox jails under AddressSanitizer and validates both the 41-unit-test suite and the 52-assertion holdout suite.
 - Candidate mutations with zero leaks, 100% test pass, and provable latency reductions are merged and tagged autonomously.
 
 ### 7. Belya Agency: Multi-Agent Orchestration Engine

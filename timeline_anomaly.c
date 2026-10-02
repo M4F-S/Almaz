@@ -10,6 +10,7 @@
 #define ANOMALY_WINDOW_DAYS 7
 #define ANOMALY_MIN_COUNT 5      /* too few events -> noise */
 #define ANOMALY_SIGMA 3.0
+#define ANOMALY_DAYS_FULL 6      /* M7: six full calendar days of history, zero-filled */
 #define ANOMALY_MAX_TYPES 64
 #define ANOMALY_MAX_DAYS 64
 
@@ -58,9 +59,7 @@ static bool pending_goal_recent(sqlite3 *db) {
 int timeline_anomaly_scan(BelyaAgent *agent) {
     if (!agent || !agent->db) return -1;
 
-    /* True "today" for the UTC day bucket (Kimi K3 P0-3: the old code took
-     * the window MAX as "today", so a 6-day-old spike re-fired until it aged
-     * out and wrote feedback rows into the scanned table). */
+    /* UTC date for the anomaly goal text (day=X diagnostic in the goal). */
     char today[16];
     time_t now = time(NULL);
     struct tm tm_utc;
@@ -72,11 +71,15 @@ int timeline_anomaly_scan(BelyaAgent *agent) {
     snprintf(today, sizeof(today), "%.*s", (int)sizeof(today) - 1, today_full);
 
     sqlite3_stmt *stmt = NULL;
+    /* M7: use calendar-day offsets so event-less days are included as zeros
+       (previous -7d window made missing days absent -> inflated mean/sigma). */
     const char *sql =
-        "SELECT event_type, date(created_at) AS d, COUNT(*) "
+        "SELECT event_type, "
+        "       CAST(julianday(date(created_at)) - julianday(date('now')) AS INTEGER) AS day_off, "
+        "       COUNT(*) "
         "FROM agent_timeline "
-        "WHERE created_at >= datetime('now', '-7 days') "
-        "GROUP BY event_type, d;";
+        "WHERE date(created_at) >= date('now', '-6 days') "
+        "GROUP BY event_type, day_off;";
     if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         return -1;
     }
@@ -90,9 +93,9 @@ int timeline_anomaly_scan(BelyaAgent *agent) {
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char *type = (const char *)sqlite3_column_text(stmt, 0);
-        const char *d = (const char *)sqlite3_column_text(stmt, 1);
+        int day_off = sqlite3_column_int(stmt, 1);
         int c = sqlite3_column_int(stmt, 2);
-        if (!type || !d || c <= 0) continue;
+        if (!type || c <= 0) continue;
         int idx = -1;
         for (int i = 0; i < ntypes; i++) {
             if (types[i][0] != '\0' && strcmp(types[i], type) == 0) { idx = i; break; }
@@ -101,12 +104,16 @@ int timeline_anomaly_scan(BelyaAgent *agent) {
             idx = ntypes++;
             strncpy(types[idx], type, 95);
             types[idx][95] = '\0';
+            /* M7: pre-fill six full calendar days with zeros so event-less
+               days actually count toward mean/sigma. */
+            for (int k = 0; k < ANOMALY_DAYS_FULL; k++) history[idx][k] = 0.0;
+            hist_n[idx] = ANOMALY_DAYS_FULL;
         }
         if (idx < 0) continue;
-        if (strcmp(d, today) == 0) {
+        if (day_off == 0) {
             todays[idx] = (double)c;
-        } else if (hist_n[idx] < ANOMALY_MAX_DAYS) {
-            history[idx][hist_n[idx]++] = (double)c;
+        } else if (day_off >= -ANOMALY_DAYS_FULL && day_off <= -1) {
+            history[idx][-day_off - 1] = (double)c;  // -1 -> slot 0 (yesterday), -6 -> slot 5
         }
     }
     sqlite3_finalize(stmt);

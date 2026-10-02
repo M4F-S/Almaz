@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
 
 #define HW_CHECK_INTERVAL 60       /* run() cadence */
@@ -204,19 +205,21 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             if (persistent && !hw->sqlite_alerted) {
                 /* single retained recovery copy — a VACUUM INTO backup can be
                    ~2x the DB; keep only the latest (Kimi K3 P1) */
-                unlink("/tmp/almaz_db_recovery.db");
+                /* M3: write to a private dir under /opt/almaz, never world-readable /tmp */
+                mkdir("/opt/almaz/recovery", 0700);
+                unlink("/opt/almaz/recovery/almaz_db_recovery.db");
                 char sql[320];
-                snprintf(sql, sizeof(sql), "VACUUM INTO '/tmp/almaz_db_recovery.db';");
+                snprintf(sql, sizeof(sql), "VACUUM INTO '/opt/almaz/recovery/almaz_db_recovery.db';");
                 char *err = NULL;
                 int vrc = sqlite3_exec(agent->db, sql, NULL, NULL, &err);
                 sqlite3_free(err);
                 snprintf(summary, sizeof(summary),
-                         "sqlite quick_check FAILED -> vacuum backup attempted (/tmp/almaz_db_recovery.db, vacuum_rc=%d). DB NOT deleted.",
+                         "sqlite quick_check FAILED -> vacuum backup attempted (/opt/almaz/recovery/almaz_db_recovery.db, vacuum_rc=%d). DB NOT deleted.",
                          vrc);
                 log_timeline(agent, summary);
                 char alert[640];
                 snprintf(alert, sizeof(alert),
-                         "🚨 *[Almaz Self-Heal]* SQLite integrity check failed. Backup attempted to `/tmp/almaz_db_recovery.db`. "
+                         "🚨 *[Almaz Self-Heal]* SQLite integrity check failed. Backup attempted to `/opt/almaz/recovery/almaz_db_recovery.db`. "
                          "Operator may need to restore memory DB from backup.");
                 send_alert(hw, bot, alert);
                 hw->sqlite_alerted = 1;

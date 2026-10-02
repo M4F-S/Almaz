@@ -50,3 +50,7 @@ promote.sh
 almaz.B
 almaz.bak
 almaz.lkg
+
+# Deploy backups (leftover round)
+almaz.old-*
+almaz_test_asan
