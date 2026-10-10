@@ -15,6 +15,15 @@
 #include <dirent.h>
 #include <unistd.h>
 
+/* R4 (2026-10-10): single source of truth for success rate, 0.0-1.0 ratio of
+   tool successes to tool calls. Callers scale for display as needed. */
+static double almaz_success_rate(const BelyaAgent *a) {
+    size_t calls = a ? a->lifetime_tool_calls : 0;
+    if (calls == 0) return 1.0;
+    return (double)a->lifetime_successes / (double)calls;
+}
+
+
 double belya_get_current_rss_mb(void) {
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) == 0) {
@@ -88,6 +97,9 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     if (sqlite3_open(db_path, &agent->db) == SQLITE_OK) {
         // Enable WAL mode for better concurrent read performance
         sqlite3_exec(agent->db, "PRAGMA journal_mode=WAL;", 0, 0, 0);
+        /* R5 (2026-10-10): writers share one DB; without a busy timeout
+           SQLITE_BUSY silently drops writes. */
+        sqlite3_busy_timeout(agent->db, 5000);
 
         const char *schema_sql = 
             "CREATE TABLE IF NOT EXISTS agent_memory ("
@@ -1905,7 +1917,7 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
         size_t total_tools = agent->lifetime_tool_calls;
-        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+        double success_rate = almaz_success_rate(agent) * 100.0;   /* R4: unified */
 
         dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
         dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
@@ -2123,7 +2135,7 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
         size_t total_tools = agent->lifetime_tool_calls;
-        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+        double success_rate = almaz_success_rate(agent) * 100.0;   /* R4: unified */
 
         dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
         dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
@@ -2262,7 +2274,7 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
     if (!agent || !agent->db) return false;
 
     size_t total = agent->lifetime_turns;
-    double success_rate = total > 0 ? ((double)agent->lifetime_successes / (double)total) : 1.0;
+    double success_rate = almaz_success_rate(agent);   /* R4: unified (was successes/turns) */
     double rss_mb = belya_get_current_rss_mb();
 
     char stats_json[512];
