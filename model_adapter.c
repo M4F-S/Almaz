@@ -489,6 +489,37 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
 /* Gateway wrapper: tracks consecutive_failures for the health watcher and
  * enforces the daily budget circuit breaker (Week-4). Success = tool call
  * present OR content that is not an error/empty message. */
+/* R7 (2026-10-11): provider-failover support. A "hard failure" is anything the
+   caller would surface as an error: no tool call AND an empty or error-prefixed
+   body. */
+static bool gateway_response_is_hard_failure(const ModelGatewayResponse *r) {
+    if (!r) return true;
+    if (r->has_tool_call) return false;
+    if (!r->content || r->content[0] == '\0') return true;
+    return strncmp(r->content, "Error:", 6) == 0 ||
+           strncmp(r->content, "API Error", 9) == 0 ||
+           strncmp(r->content, "Network Error", 13) == 0 ||
+           strncmp(r->content, "Empty model response", 20) == 0 ||
+           strncmp(r->content, "Empty response from stream", 26) == 0 ||
+           strncmp(r->content, "Connection Error", 16) == 0;
+}
+
+/* Release a response before the failover attempt overwrites it. */
+static void gateway_response_clear(ModelGatewayResponse *r) {
+    if (!r) return;
+    if (r->content) { free(r->content); r->content = NULL; }
+    if (r->reasoning_content) { free(r->reasoning_content); r->reasoning_content = NULL; }
+    for (size_t k = 0; k < r->tool_call_count; k++) {
+        if (r->tool_calls[k].id) free(r->tool_calls[k].id);
+        if (r->tool_calls[k].name) free(r->tool_calls[k].name);
+        if (r->tool_calls[k].arguments_json) free(r->tool_calls[k].arguments_json);
+    }
+    if (r->tool_calls) { free(r->tool_calls); r->tool_calls = NULL; }
+    r->tool_call_count = 0;
+    r->has_tool_call = false;
+    r->prompt_tokens = r->completion_tokens = r->cached_tokens = 0;
+}
+
 static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
     if (!self) {
         ModelGatewayResponse r = {0};
@@ -512,6 +543,29 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema);
+
+    /* R7 (2026-10-11): the inner function retries the SAME endpoint only, so a
+       primary-provider outage used to mean total loss of service (OpenRouter was
+       reachable only via the interactive /openrouter command). */
+    if (self->fallback_endpoint && !self->fallback_active &&
+        gateway_response_is_hard_failure(&res)) {
+        char *prev_endpoint = self->endpoint;
+        char *prev_key = self->api_key;
+        char *prev_model = self->model;
+        fprintf(stderr, "[gateway] primary provider failed (%s) -> failing over to %s\n",
+                res.content ? res.content : "unknown", self->fallback_endpoint);
+        self->endpoint = self->fallback_endpoint;
+        self->api_key = self->fallback_api_key;
+        self->model = self->fallback_model;
+        self->fallback_active = true;
+        gateway_response_clear(&res);
+        res = openai_chat_complete_inner(self, messages_json, tools_schema);
+        self->endpoint = prev_endpoint;
+        self->api_key = prev_key;
+        self->model = prev_model;
+        self->fallback_active = false;
+    }
+
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long duration_sec = (long)(t1.tv_sec - t0.tv_sec);
 
@@ -783,6 +837,17 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     }
     gw->timeout_sec = 120;
     gw->max_retries = 3;
+    /* R7: optional automatic provider failover, env-configured (never hardcoded). */
+    {
+        const char *fb_ep = getenv("MODEL_FALLBACK_ENDPOINT");
+        const char *fb_key = getenv("OPENROUTER_API_KEY");
+        const char *fb_name = getenv("MODEL_FALLBACK_NAME");
+        if (fb_ep && fb_ep[0]) {
+            gw->fallback_endpoint = xstrdup(fb_ep);
+            gw->fallback_api_key = xstrdup(fb_key ? fb_key : "");
+            gw->fallback_model = xstrdup((fb_name && fb_name[0]) ? fb_name : gw->model);
+        }
+    }
     gw->streaming = true;
     budget_limits_from_env(&gw->budget_limits);
     const char *bp = getenv("BUDGET_PATH");
@@ -809,6 +874,9 @@ void model_gateway_free(ModelGateway *gw) {
         gw->curl_handle = NULL;
     }
     free(gw->endpoint);
+    if (gw->fallback_endpoint) free(gw->fallback_endpoint);
+    if (gw->fallback_api_key) free(gw->fallback_api_key);
+    if (gw->fallback_model) free(gw->fallback_model);
     free(gw->api_key);
     free(gw->model);
     free(gw->user_agent);
