@@ -74,7 +74,23 @@ void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, co
 void belya_agent_persist_memory(BelyaAgent *agent, const char *topic, const char *content);
 void belya_agent_persist_memory_scoped(BelyaAgent *agent, const char *topic, const char *content, const char *wing, const char *room);
 char *belya_agent_search_memory(BelyaAgent *agent, const char *query);
+
+// Late-2026 Phase 2: FadeMem Biological Memory & Semantics
+double almaz_fademem_retention(time_t now, time_t last_acc, int access_count, double salience, double lambda);
+size_t almaz_fademem_prune_sweep(BelyaAgent *agent, double min_retention);
+size_t almaz_concept_fusion_sweep(BelyaAgent *agent);
+
+// Late-2026 Phase 2: CORAL Dual-Stream Memory Routing
+void almaz_coral_record_tactical(BelyaAgent *agent, const char *task_id, const char *trace_type, const char *summary, const char *details);
+bool almaz_coral_promote_strategic(BelyaAgent *agent, const char *rubric_key, const char *failure_mode, const char *trigger_pattern, const char *root_cause, const char *guideline, const char *source_task);
+char *almaz_coral_query_strategic(BelyaAgent *agent, const char *pattern);
+
+// Late-2026 Phase 2: SimpleMem De-linearized Semantic Facts
+void almaz_simplemem_record_fact(BelyaAgent *agent, const char *entity_key, const char *fact_text, int turn);
+char *almaz_simplemem_query_facts(BelyaAgent *agent, const char *entity_key, const char *query);
+
 void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent);
+void belya_agent_compact_history_middle_out(BelyaAgent *agent, size_t keep_recent);
 void belya_agent_clear_history(BelyaAgent *agent);
 
 // Token Budgeting & Estimation

@@ -5,6 +5,8 @@
 #include "linenoise.h"
 #include "mcp_client.h"
 #include <sys/socket.h>
+#include <stdint.h>
+#include <time.h>
 
 typedef enum {
     PERM_ALLOW,
@@ -26,6 +28,24 @@ typedef struct {
     char *custom_script_path;   // Non-null if tool is backed by an on-disk script
 } BelyaRegisteredTool;
 
+#define HARNESS_ACTION_HISTORY_SIZE 32
+#define HARNESS_LOOP_THRESHOLD_CYCLES 3
+
+typedef struct {
+    uint64_t action_hash;
+    char tool_name[48];
+    uint32_t return_code;
+    time_t timestamp;
+} HarnessActionRecord;
+
+typedef struct {
+    HarnessActionRecord history[HARNESS_ACTION_HISTORY_SIZE];
+    int head;
+    int count;
+    int consecutive_cycle_matches;
+    int detected_period;
+} HarnessLoopDetector;
+
 struct BelyaHarness {
     BelyaAgent *agent;
     BelyaRegisteredTool tools[64];
@@ -45,6 +65,10 @@ struct BelyaHarness {
     bool files_modified_in_turn;
     bool verification_performed_in_turn;
     bool verification_guard_tripped;
+
+    // In-Context Locking Breaker state (Late-2026 Attractor Detector)
+    HarnessLoopDetector loop_detector;
+    bool loop_breaker_tripped;
 
     // Belya Agency Tool Bounding & Role Guard state
     char active_role[64];
@@ -67,6 +91,7 @@ void belya_harness_repl(BelyaHarness *h);
 void belya_harness_execute_turn(BelyaHarness *h, const char *prompt);
 void belya_harness_reset_turn_state(BelyaHarness *h);
 bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_name, const char *args_json, const char *observation, char **out_breaker_msg);
+int belya_harness_detect_loop(BelyaHarness *h, int *out_period);
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write);
 bool is_path_safe(const char *path);
 bool belya_harness_is_secret_path(const char *path);
@@ -79,6 +104,17 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
 void almaz_goals_generate_deterministic(BelyaHarness *h);
 bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);
+
+// Late-2026 Phase 3: AST Symbol Graph Navigation & ROMA Task Trees
+size_t belya_harness_index_symbols(BelyaHarness *h, const char *dir_path);
+char *belya_harness_goto_definition(BelyaHarness *h, const char *symbol_name);
+char *belya_harness_find_callers(BelyaHarness *h, const char *symbol_name);
+
+// Late-2026 Phase 3: Repo-to-MCP Dynamic Synthesis
+bool belya_harness_synthesize_mcp_server(BelyaHarness *h, const char *server_name, const char *tool_name, const char *desc, const char *script_cmd, const char *schema_json);
+
+// Late-2026 Phase 3: Mythos Variant Security Analysis
+char *belya_harness_audit_security_variants(BelyaHarness *h, const char *pattern_type, const char *target_path);
 
 void belya_harness_free(BelyaHarness *h);
 

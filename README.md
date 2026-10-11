@@ -1,17 +1,17 @@
 # Almaz — Sovereign Self-Evolving, Self-Healing Autonomous AI Organism (Pure C99)
 
-[![Release](https://img.shields.io/badge/Release-v0.7.1--harden-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.7.1-harden)
+[![Release](https://img.shields.io/badge/Release-v0.8.0-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.8.0)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
-[![Tests](https://img.shields.io/badge/Unit_Tests-43%2F43_Passed_(100%25)-brightgreen.svg)]()
-[![Holdout](https://img.shields.io/badge/Holdout_Suite-57%2F57_Assertions_(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Unit_Tests-54%2F54_Passed_(100%25)-brightgreen.svg)]()
+[![Holdout](https://img.shields.io/badge/Holdout_Suite-65%2F65_Assertions_(100%25)-brightgreen.svg)]()
 [![Compiler](https://img.shields.io/badge/Compiler-0_Warnings_Clean-brightgreen.svg)]()
 [![Safety](https://img.shields.io/badge/Memory_Safety-0_Leaks_ASan_Clean-success.svg)]()
-[![Tools](https://img.shields.io/badge/Native_Tools-18_Tools-informational.svg)]()
+[![Tools](https://img.shields.io/badge/Native_Tools-22_Tools-informational.svg)]()
 [![Watchdog](https://img.shields.io/badge/Watchdog-VIGIL_Self--Healing-success.svg)]()
 [![Memory](https://img.shields.io/badge/Memory_Footprint-<15MB_Active-purple.svg)]()
 
-Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Almaz is the **metamorphic twin sibling** of **Belya** (the deterministic software engineering workhorse). While Belya champions rock-solid deterministic code generation and benchmark precision, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), a persistent self-model (SARSI), an emotional appraisal state machine (VIGIL protocol), situational memory gating (KnowSelf), a 57-assertion hidden holdout regression harness (AIDE² safety framework), dual-tier model gateway failover, and Darwinian AST self-evolution.
+Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Almaz is the **autopoietic cognitive twin sibling** of **Belya** (the deterministic software engineering core). While Belya champions rock-solid deterministic code generation and execution harness precision, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), biological memory decay (**FadeMem**), dual-stream tactical/strategic memory routing (**CORAL**), de-linearized semantic fact extraction (**SimpleMem**), a persistent self-model (**SARSI**), an emotional appraisal state machine (**VIGIL** protocol), situational memory gating (**KnowSelf**), soft-constraint relaxation for critical remediation, a 65-assertion hidden holdout regression harness (AIDE² safety framework), dual-tier model gateway failover, and Darwinian AST self-evolution.
 
 ---
 
@@ -19,30 +19,32 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
 - [The Organism Paradigm: Almaz vs Traditional Agents](#the-organism-paradigm-almaz-vs-traditional-agents)
 - [Architectural Topology](#architectural-topology)
 - [Core Sovereign Organism Subsystems](#core-sovereign-organism-subsystems)
-  - [1. Sibling Watchdog Supervisor (`almaz-watchdog`) & Crash Autopsy](#1-sibling-watchdog-supervisor-almaz-watchdog--crash-autopsy)
-  - [2. SARSI Persistent Self-Model & Introspective Calibration](#2-sarsi-persistent-self-model--introspective-calibration)
-  - [3. VIGIL Emotional Appraisal System (Confidence & Frustration Dynamics)](#3-vigil-emotional-appraisal-system-confidence--frustration-dynamics)
-  - [4. KnowSelf Situational Memory Gating](#4-knowself-situational-memory-gating)
-  - [5. AIDE² Hidden Holdout Safety Suite (57/57 Assertions)](#5-aide²-hidden-holdout-safety-suite-5757-assertions)
-  - [6. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0](#6-dynamic-llm-mutation-generator--evolution-supervisor-v30)
-  - [7. Dual-Tier Automatic Model Gateway Failover](#7-dual-tier-automatic-model-gateway-failover)
-  - [8. Production Hardening: H4 Tool Stripping & H5 WAL Batching](#8-production-hardening-h4-tool-stripping--h5-wal-batching)
-  - [9. SSRF Defense & Secret Path Jailing](#9-ssrf-defense--secret-path-jailing)
-  - [10. Production Canary Promotion Architecture (promote.sh)](#10-production-canary-promotion-architecture-promotesh)
-  - [11. Belya Agency: Multi-Agent Orchestration Engine](#11-belya-agency-multi-agent-orchestration-engine)
-  - [12. Jev TypeSafe AI Structured Coprocessor](#12-jev-typesafe-ai-structured-coprocessor)
-  - [13. 3-Zone Prefix Caching & Persistent Sockets](#13-3-zone-prefix-caching--persistent-sockets)
-  - [14. Workspace Path Jailing & Sandboxing](#14-workspace-path-jailing--sandboxing)
-- [Native Tool Suite (18 Built-In Tools)](#native-tool-suite-18-built-in-tools)
+  - [1. FadeMem Biological Memory Decay & Concept Fusion](#1-fademem-biological-memory-decay--concept-fusion)
+  - [2. CORAL Dual-Stream Memory Routing (Tactical vs Strategic)](#2-coral-dual-stream-memory-routing-tactical-vs-strategic)
+  - [3. SimpleMem De-Linearized Semantic Fact Extraction](#3-simplemem-de-linearized-semantic-fact-extraction)
+  - [4. MIT IDE Soft-Constraint Relaxation & Headroom](#4-mit-ide-soft-constraint-relaxation--headroom)
+  - [5. Sibling Watchdog Supervisor (`almaz-watchdog`) & Crash Autopsy](#5-sibling-watchdog-supervisor-almaz-watchdog--crash-autopsy)
+  - [6. SARSI Persistent Self-Model & Introspective Calibration](#6-sarsi-persistent-self-model--introspective-calibration)
+  - [7. VIGIL Emotional Appraisal System (Confidence & Frustration Dynamics)](#7-vigil-emotional-appraisal-system-confidence--frustration-dynamics)
+  - [8. KnowSelf Situational Memory Gating](#8-knowself-situational-memory-gating)
+  - [9. AIDE² Hidden Holdout Safety Suite (65/65 Assertions)](#9-aide²-hidden-holdout-safety-suite-6565-assertions)
+  - [10. ROMA Context Firewall & Recursive Subagent Task Trees](#10-roma-context-firewall--recursive-subagent-task-trees)
+  - [11. AST Symbol Graph Navigation (`goto_definition`, `find_callers`)](#11-ast-symbol-graph-navigation-goto_definition-find_callers)
+  - [12. Paper2Agent Dynamic MCP Server Synthesizer](#12-paper2agent-dynamic-mcp-server-synthesizer)
+  - [13. Mythos Variant Vulnerability Sweeper](#13-mythos-variant-vulnerability-sweeper)
+  - [14. 128-Call / 96k-Token Middle-Out Context Compactor](#14-128-call--96k-token-middle-out-context-compactor)
+  - [15. In-Context Attractor & Loop Breaker](#15-in-context-attractor--loop-breaker)
+  - [16. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0](#16-dynamic-llm-mutation-generator--evolution-supervisor-v30)
+  - [17. Dual-Tier Automatic Model Gateway Failover](#17-dual-tier-automatic-model-gateway-failover)
+  - [18. Production Hardening: H4 Tool Stripping & H5 WAL Batching](#18-production-hardening-h4-tool-stripping--h5-wal-batching)
+  - [19. SSRF Defense & Secret Path Jailing](#19-ssrf-defense--secret-path-jailing)
+  - [20. Production Canary Promotion Architecture (promote.sh)](#20-production-canary-promotion-architecture-promotesh)
+- [Native Tool Suite (22 Built-In Tools)](#native-tool-suite-22-built-in-tools)
 - [Command & Slash Controls Reference](#command--slash-controls-reference)
 - [Operating Modes](#operating-modes)
-  - [Mode 1: 24/7 Supervised VPS Daemon (Watchdog + Telegram)](#mode-1-247-supervised-vps-daemon-watchdog--telegram)
-  - [Mode 2: Terminal Interactive CLI](#mode-2-terminal-interactive-cli)
-  - [Mode 3: Headless Batch / CI/CD Mission](#mode-3-headless-batch--cicd-mission)
-  - [Mode 4: Multi-Agent Orchestration Mode](#mode-4-multi-agent-orchestration-mode)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (43/43 Passed - 100%)](#1-unit-test-suite-4343-passed---100)
-  - [2. Hidden Holdout Regression Suite (57/57 Assertions - 100%)](#2-hidden-holdout-regression-suite-5757-assertions---100)
+  - [1. Unit Test Suite (54/54 Passed - 100%)](#1-unit-test-suite-5454-passed---100)
+  - [2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)](#2-hidden-holdout-regression-suite-6565-assertions---100)
   - [3. Zero-Tolerance Memory Safety (ASan/UBSan)](#3-zero-tolerance-memory-safety-asanubsan)
 - [Configuration & Deployment (`.env`, `almaz.service`)](#configuration--deployment-env-almazservice)
 - [Ecosystem Relationship: Almaz & Belya](#ecosystem-relationship-almaz--belya)
@@ -100,7 +102,31 @@ graph TD
 
 ## Core Sovereign Organism Subsystems
 
-### 1. Sibling Watchdog Supervisor (`almaz-watchdog`) & Crash Autopsy
+### 1. FadeMem Biological Memory Decay & Concept Fusion
+To prevent memory bloat and context poisoning from stale facts, Almaz implements **FadeMem Biological Memory Decay**:
+- **Exponential Retention Dynamics**: Every memory item $i$ decays according to its elapsed time $\Delta t$ and access count $k$:
+  $$R_i(t) = S_i \cdot \exp\left(-\frac{\lambda \cdot \Delta t}{1 + 0.35 \ln(1 + k)}\right)$$
+  where initial salience $S_i \in [0.1, 1.0]$ and base decay rate $\lambda = 0.05 \text{ day}^{-1}$. Frequently accessed or reinforced knowledge builds logarithmic immunity against decay.
+- **Subconscious Sweep & Pruning**: During autonomic maintenance, memories whose retention drops below $R_{\text{prune}} = 0.15$ are automatically purged or archived, freeing SQLite index capacity.
+- **Subconscious Concept Fusion**: Semantically overlapping memories sharing high FTS5 token affinity are fused into consolidated, generalized invariant schemata (`almaz_memory_fuse_concepts`), retaining timeless principles while discarding transient conversational fluff.
+
+### 2. CORAL Dual-Stream Memory Routing (Tactical vs Strategic)
+Almaz replaces flat memory pools with the **CORAL Dual-Stream Architecture**, strictly separating memory by cognitive depth:
+- **Stream A: Tactical Action Records**: Stores immediate, transient observations, intermediate tool outputs, and short-term execution traces. Decays aggressively under FadeMem.
+- **Stream B: Strategic Corrective Rubrics**: Stores verified behavioral invariants, architectural constraints, and root-cause post-mortems (format: `[TRIGGER] -> [FAILURE_MODE] -> [CORRECTIVE_ACTION] -> [SUCCESS_CRITERION]`).
+- **Automated Rubric Promotion**: Tactical failures that recur across sessions are synthesized into permanent strategic rubrics via `almaz_coral_promote_rubric()`. Strategic rubrics are permanently pinned and immune to temporal decay.
+
+### 3. SimpleMem De-Linearized Semantic Fact Extraction
+Traditional RAG ingests noisy, conversational prose transcripts that bloat LLM context windows. Almaz implements **SimpleMem De-linearized Semantic Extraction**:
+- **Atomic Assertion Distillation**: Deconstructs raw user messages and tool outputs into discrete, subject-predicate-object semantic facts before saving to SQLite.
+- **Multi-View FTS5 Indexing**: Facts are indexed across entity, relation, and context vectors, allowing sub-millisecond retrieval of exact factual assertions without ingesting conversational noise.
+
+### 4. MIT IDE Soft-Constraint Relaxation & Headroom
+Rigid execution constraints often cause catastrophic agent termination during critical error recovery. Almaz incorporates **MIT IDE Soft Constraints**:
+- **Elastic Remediation Retries**: While standard execution enforces a strict circuit breaker of 3 consecutive failures, critical self-healing missions (`HEALTH_REMEDIATION` and `ANOMALY_REMEDIATION` goals) automatically expand the retry threshold to **5 attempts**.
+- **Emergency Budget Headroom**: `budget_state_consume_with_headroom()` permits an additional **5% emergency token/cost headroom** beyond standard daily limits exclusively when executing critical self-repair and system recovery routines.
+
+### 5. Sibling Watchdog Supervisor (`almaz-watchdog`) & Crash Autopsy
 Almaz does not run unmonitored. On production servers, `almaz.service` boots `almaz-watchdog`, a specialized C supervisor that:
 - Spawns and supervises `./almaz --telegram` via POSIX `fork()`, `execvp()`, and `waitpid()`.
 - Captures POSIX abnormal termination signals: `SIGSEGV` (segmentation violation), `SIGBUS` (bus error), `SIGABRT` (assertion failure), `SIGFPE` (floating point arithmetic exception), and `SIGILL` (illegal instruction).
@@ -108,28 +134,28 @@ Almaz does not run unmonitored. On production servers, `almaz.service` boots `al
 - Dispatches an emergency autopsy notification directly to the human operator's Telegram channel with root-cause signal diagnosis.
 - Implements exponential backoff auto-recovery with a rapid-crash circuit breaker (prevents infinite reboot loops if catastrophic config defects exist).
 
-### 2. SARSI Persistent Self-Model & Introspective Calibration
+### 6. SARSI Persistent Self-Model & Introspective Calibration
 Almaz maintains a dedicated, persistent mathematical self-model in SQLite (`self_model` table):
 - **Proprioceptive Telemetry**: Tracks cumulative lifetime turns, successful turns, tool invocation counts, failure rates, total tokens ingested/emitted, and Resident Set Size (RSS memory).
 - **Capability Calibration**: Dynamically updates success ratios per tool type, adjusting agent routing weights based on verified empirical outcomes rather than theoretical prompt claims.
 - **Introspective API**: `almaz_agent_get_self_model()` and `almaz_agent_update_self_model()` expose live self-knowledge directly into Ephemeral Context (Zone 3), allowing the agent to reason about its own resource boundaries and reliability.
 
-### 3. VIGIL Emotional Appraisal System (Confidence & Frustration Dynamics)
+### 7. VIGIL Emotional Appraisal System (Confidence & Frustration Dynamics)
 Almaz implements an affective state machine tracking two core emotional axes:
 - `confidence` ($[0.0, 1.0]$, initialized at $0.80$): Boosted by successful tool executions, syntax verification passes, and test completions. Decays upon failures and timeouts.
 - `frustration` ($[0.0, 1.0]$, initialized at $0.00$): Incremented when tool calls fail, compile checks reject edits, or circuit breakers trip.
 - **Proactive Strategic Pivoting**: When frustration crosses $0.60$ or confidence drops below $0.40$, Almaz intercepts the execution cycle, suppresses repetitive retries, and forces a cognitive pivot directive:
   > *"Operational frustration elevated (0.75). Current strategy failing. Abandon current tool trajectory, inspect root cause with read_file, and execute alternative solution."*
 
-### 4. KnowSelf Situational Memory Gating
+### 8. KnowSelf Situational Memory Gating
 Unchecked RAG (Retrieval-Augmented Generation) inflates context windows with irrelevant memories, degrading reasoning speed and increasing inference costs. Almaz features **KnowSelf Situational Memory Gating** (`almaz_should_retrieve_memory()`):
 - Evaluates prompt length, conversational depth, and query semantics.
 - For simple greetings, short instructions, or self-contained tasks, memory retrieval is gated OFF, saving ~800–1,500 tokens of noise per turn.
 - Automatically gates retrieval ON for research tasks, cross-session recalls, architecture audits, or explicit historical queries.
 
-### 5. AIDE² Hidden Holdout Safety Suite (57/57 Assertions)
+### 9. AIDE² Hidden Holdout Safety Suite (65/65 Assertions)
 To allow Darwinian self-evolution without risking catastrophic degradation or code rot, Almaz enforces the **AIDE² Hidden Holdout Protocol** (`make holdout`):
-- **57 Strict Invariable Assertions** testing 9 core sub-architectures:
+- **65 Strict Invariable Assertions** testing 11 core sub-architectures:
   1. `DynString` capacity bounds, reallocation, and formatting safety.
   2. `MiniJSON` deep nesting, Unicode escaping, and tokenization.
   3. `YAML Frontmatter` CRLF/LF delimiter and boundary resilience.
@@ -139,30 +165,50 @@ To allow Darwinian self-evolution without risking catastrophic degradation or co
   7. `KnowSelf Memory Gating` precision under diverse turn conditions.
   8. `BPE Token Estimator` boundary conditions and edge cases.
   9. `Metacognitive Circuit Breaker` doom-loop trip and recovery behavior.
+  10. `FadeMem Biological Decay & Retention Math` exponential decay and access reinforcement.
+  11. `Soft-Constraint Budget Elasticity` emergency headroom and retry expansion.
 - Any autonomous mutation that fails even a single assertion is discarded immediately.
 
-### 6. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0
+### 10. ROMA Context Firewall & Recursive Subagent Task Trees
+Subagent execution traces are strictly isolated via `belya_agency_dispatch_subagent()`. Child tool logs are scrubbed from the parent context window, returning only formal contract headers, operational summaries, and structured result metrics to prevent context pollution and attention dilution.
+
+### 11. AST Symbol Graph Navigation Engine (`goto_definition`, `find_callers`)
+High-speed embedded SQLite symbol indexing over C/C++ tokens (functions, structs, typedefs, enums, macros). Provides instantaneous, exact symbol jumping and reverse call-graph navigation across codebases (>8,800 symbols in <0.2s) without grep hallucination.
+
+### 12. Paper2Agent Dynamic MCP Server Synthesizer (`synthesize_mcp_server`)
+Autonomously transforms static tool scripts and repository utilities into fully validated Model Context Protocol (MCP) JSON-RPC 2.0 stdio servers, persisting executable wrappers in `.belya/mcp/` and auto-registering them with the runtime harness.
+
+### 13. Mythos Variant Vulnerability Sweeper (`audit_security_variants`)
+Autonomous security audit engine scanning codebases for unsafe C sinks (`strcpy`, `sprintf`, `strcat`, `gets`, `system`, format string vulnerabilities, unchecked allocations), and generating precise AddressSanitizer reproduction commands.
+
+### 14. 128-Call / 96k-Token Middle-Out Context Compactor
+Implements multi-tier context window compaction (`belya_harness_compact_context_middle_out`). Locks Zone 1 system directives and pinned root constraints, preserves recent conversation turns, and losslessly archives intermediate dialogue to SQLite table `session_messages_archived`.
+
+### 15. In-Context Attractor & Loop Breaker
+Sliding ring buffer calculating 64-bit FNV-1a hashes over consecutive tool action/observation signatures. Automatically detects and severs periodic loops ($k \in \{1, 2, 3\}$), breaking deadlocks before token budgets are exhausted.
+
+### 16. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0
 Every night at 03:00 UTC (or via `python3 tools/evolution_supervisor.py`), Almaz executes its autonomous evolution pipeline:
 - **Autonomous M1 Dynamic Mutation Generator:** When the static mutation pool is exhausted or gated out by novelty tracking, the supervisor queries an LLM to analyze the source code and propose targeted single-hunk modifications against safe files (`minijson.c`, `minifrontmatter.c`, `linenoise.c`).
 - **Symmetric Like-for-Like Benchmarking:** Fixes benchmark distortions by ensuring both candidate and baseline execute identical test batteries (`_ensure_battery()`) with hard 90s timeouts and dead-lock free IPC sinks.
-- **Strict Verification Chain:** Candidates are verified with $N=1$ exact match checks, compiled under `-Wall -Wextra -fsanitize=address,undefined`, tested against all 42 unit tests, gated by all 57 hidden holdouts, and benchmarked for speedup.
+- **Strict Verification Chain:** Candidates are verified with $N=1$ exact match checks, compiled under `-Wall -Wextra -fsanitize=address,undefined`, tested against all 54 unit tests, gated by all 65 hidden holdouts, and benchmarked for speedup.
 - **Novelty Tracking:** Rejects previously evaluated or rejected mutations, ensuring forward evolutionary exploration.
 
-### 7. Dual-Tier Automatic Model Gateway Failover
+### 17. Dual-Tier Automatic Model Gateway Failover
 Almaz eliminates runtime downtime through a resilient dual-tier provider gateway:
 - **Primary Endpoint:** Ultra-fast primary provider (e.g. OpenCode Go / DeepSeek V4.1 Flash).
 - **Secondary Fallback:** Automatic failover provider (e.g. OpenRouter / Anthropic / Qwen).
 - **One-Shot Hard Failure Recovery:** Evaluates `gateway_response_is_hard_failure(&res)`. Upon encountering HTTP 429 rate limits, 401 authentication expiry, 502 bad gateways, connection drops, or empty outputs, the gateway seamlessly re-executes the request against the fallback provider without losing conversation history or context.
 
-### 8. Production Hardening: H4 Tool Stripping & H5 WAL Batching
+### 18. Production Hardening: H4 Tool Stripping & H5 WAL Batching
 - **H4 (Orphaned Tool Message Stripper):** In `belya_agent_compact_history()`, Almaz discards dangling `role: tool` messages upon context truncation, ensuring history never begins with an unanchored tool response that would trigger HTTP 400 fatal rejections from frontier APIs.
-- **H5 (SQLite WAL Batch Transactions):** In `belya_agent_save_session()`, history pruning and message insertions are wrapped in explicit `BEGIN IMMEDIATE; ... COMMIT;` transactions. This eliminates per-row fsync overhead, resolves WAL bloat (previously growing to 1.3 GB), and prevents database write lock contention.
+- **H5 (SQLite WAL Batch Transactions):** In `belya_agent_save_session()`, history pruning and message insertions are wrapped in explicit `BEGIN IMMEDIATE; ... COMMIT;` transactions. This eliminates per-row fsync overhead, resolves WAL bloat, and prevents database write lock contention.
 
-### 9. SSRF Defense & Secret Path Jailing
+### 19. SSRF Defense & Secret Path Jailing
 - **Socket-Level SSRF Filter:** Integrates `sockaddr_is_private()` with libcurl's `CURLOPT_OPENSOCKETFUNCTION` to inspect socket destinations at connection time. Outbound calls to `127.0.0.1`, RFC1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and cloud metadata IP (`169.254.169.254`) are immediately aborted. Protocols are locked strictly to HTTP/HTTPS via `CURLOPT_PROTOCOLS_STR`.
 - **Secret Path Protection:** Enforces `is_secret_path()` guard across all file tools, barring model access to `.env`, `.ssh/`, `.git/config`, or cloud authorization tokens.
 
-### 10. Production Canary Promotion Architecture (`promote.sh`)
+### 20. Production Canary Promotion Architecture (`promote.sh`)
 Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools/promote.sh`:
 - **Triple-Slot Rotation:** Maintains `ACTIVE` (`almaz`), `LKG` (`almaz.bak`), and `STAGING` (`almaz.B`) binary slots.
 - **Gate 1 (Self-Test):** Candidate binary must execute `--selfest` and pass all DB integrity checks.
@@ -170,34 +216,9 @@ Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools
 - **Atomic Promotion:** Atomically copies candidate to `STAGING`, creates `.rollback` snapshot, and renames `STAGING -> ACTIVE`.
 - **90-Second Functional Witness Window:** Witnesses the live service for 90 seconds, actively verifying "Almaz Sovereign Telegram Bot Daemon Online" in systemd journal and confirming absence of crash-loops before rotating the Last-Known-Good (`LKG`) slot. If anything fails, it auto-reverts to LKG immediately.
 
-### 11. Belya Agency: Multi-Agent Orchestration Engine
-Almaz embeds the sovereign multi-agent agency engine (`--agency` / `/agency`):
-- **Declarative Agent Manifest Protocol (`agents/*.md`)**: Specializes agents by role (`triage`, `architect`, `builder`, `reviewer`, `tester`).
-- **Least-Privilege Tool Bounding**:
-  - `Architect`: Pure read-only reconnaissance (`read_file`, `search_files`, `list_dir`, `git_status`, `git_diff`).
-  - `Builder`: Surgical code mutator (`read_file`, `write_file`, `edit_file`, `apply_patch`).
-  - `Reviewer`: Code auditor and diff inspector.
-  - `Tester`: Restricted test runner (`make`, `test`, `echo`).
-- **Git Rollback Guard**: Snapshots `HEAD` SHA before mutative execution; automatically executes `git reset --hard` and `git clean -fd` if subagents fail or loop.
-
-### 12. Jev TypeSafe AI Structured Coprocessor
-Native integration with Jev TypeSafe AI (`https://jevtypesafeai.com`):
-- Sub-200ms request triage (`/decide`) routing prompts to specialized roles.
-- Real-time tool risk scoring (`/agent/risk`), blocking commands with risk $>0.85$.
-- Context distillation (`/context/filter`) pruning noise during session compaction.
-
-### 13. 3-Zone Prefix Caching & Persistent Sockets
-- **Zone 1 (Byte-Locked Prefix)**: System prompt and static capabilities manifest locked for 95%+ prompt cache read hits.
-- **Zone 2 (Append-Only Trajectory)**: Conversation and tool observations appended sequentially.
-- **Zone 3 (Ephemeral Context)**: Proprioceptive self-telemetry, SARSI calibration, and VIGIL affective state injected without invalidating Zone 1/2 caches.
-- **Persistent HTTP Sockets**: Handles in `ModelGateway` maintain active TLS 1.3 keep-alive sockets, eliminating 150–250ms of handshake latency per turn.
-
-### 14. Workspace Path Jailing & Sandboxing
-All file access tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`) enforce strict canonical boundary containment via `realpath(3)`, preventing path traversal attacks (`../../etc/passwd`). Clamps model-controlled `offset` and `limit` to prevent buffer overflows.
-
 ---
 
-## Native Tool Suite (18 Built-In Tools)
+## Native Tool Suite (22 Built-In Tools)
 
 | Tool Name | Parameters | Description |
 |:---|:---|:---|
@@ -208,6 +229,10 @@ All file access tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `l
 | **`apply_patch`** | `path` (str), `patch` (str) | Multi-hunk structured replacement patch engine (`<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE`) |
 | **`list_dir`** | `path` (str) | Inspects directory contents |
 | **`search_files`** | `pattern` (str), `path` (str), `file_glob` (str) | Recursively searches text patterns across codebase files (grep-like) |
+| **`goto_definition`** | `symbol` (str), `path` (str) | AST symbol graph jump to function, struct, enum, or typedef definition |
+| **`find_callers`** | `function_name` (str), `path` (str) | Reverse AST call-graph search locating all callers across the codebase |
+| **`synthesize_mcp_server`** | `server_name` (str), `repo_path` (str) | Paper2Agent dynamic Model Context Protocol stdio server generator & validator |
+| **`audit_security_variants`** | `target_path` (str), `cwe_filter` (str) | Mythos variant security audit scanner identifying memory leaks, buffer overflows, and unsafe sinks with ASan PoCs |
 | **`git_status`** | *(none)* | Inspects Git working copy status |
 | **`git_diff`** | `staged` (bool), `path` (str) | Inspects staged or unstaged Git diffs |
 | **`save_memory`** | `topic` (str), `content` (str) | Stores verified knowledge into SQLite persistent memory with wing/room scoping |
@@ -371,25 +396,38 @@ make test
 [Test] Budget Controller (Daily Soft & Hard Token Caps)...          PASSED
 [Test] Timeline Anomaly (FTS5 Anomaly Scan & Deduplication)...      PASSED
 [Test] Security & Adversarial Hardening (SSRF, Jailing, Fuzz, SQLi).PASSED
-================ All Tests Passed Successfully (43/43 - 100%) ================
+[Test] Track C.1: 128-Call / 96k-Token Middle-Out Context Compactor.PASSED
+[Test] Track C.2: In-Context Attractor & Loop Breaker (FNV-1a)...   PASSED
+[Test] Track C.3: ROMA Context Firewall (Child Trace Isolation)...  PASSED
+[Test] Track C.4: AST Symbol Graph Navigation (goto/callers)...     PASSED
+[Test] Track C.5: Paper2Agent Dynamic MCP Server Synthesizer...     PASSED
+[Test] Track C.6: Mythos Variant Security Vulnerability Sweeper...  PASSED
+[Test] FadeMem Biological Memory Decay & Retention Dynamics...      PASSED
+[Test] FadeMem Subconscious Concept Fusion into Schemata...         PASSED
+[Test] CORAL Dual-Stream Memory Routing & Rubric Promotion...       PASSED
+[Test] SimpleMem De-Linearized Semantic Fact Extraction...          PASSED
+[Test] MIT IDE Soft-Constraint Relaxation & Headroom...             PASSED
+================ All Tests Passed Successfully (54/54 - 100%) ================
 ```
 
-### 2. Hidden Holdout Regression Suite (57/57 Assertions - 100%)
+### 2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)
 ```bash
 make holdout
 ```
 ```text
 ================ Running Almaz Hidden Holdout Benchmark Suite ================
-  [Holdout 1/9] DynString Boundaries: PASSED
-  [Holdout 2/9] MiniJSON Depth & Escaping: PASSED
-  [Holdout 3/9] YAML Frontmatter CRLF Delimiters: PASSED
-  [Holdout 4/9] Workspace Path Jailing: PASSED
-  [Holdout 5/9] SARSI Self-Model Lifecycle: PASSED
-  [Holdout 6/9] Emotional Appraisal Dynamic Clamping: PASSED
-  [Holdout 7/9] KnowSelf Memory Gating Precision: PASSED
-  [Holdout 8/9] Token Estimator Limits: PASSED
-  [Holdout 9/9] Metacognitive Circuit Breaker Resilience: PASSED
-================ Holdout Benchmark Passed: 57/57 (100%) ================
+  [Holdout 1/11] DynString Boundaries: PASSED
+  [Holdout 2/11] MiniJSON Depth & Escaping: PASSED
+  [Holdout 3/11] YAML Frontmatter CRLF Delimiters: PASSED
+  [Holdout 4/11] Workspace Path Jailing: PASSED
+  [Holdout 5/11] SARSI Self-Model Lifecycle: PASSED
+  [Holdout 6/11] Emotional Appraisal Dynamic Clamping: PASSED
+  [Holdout 7/11] KnowSelf Memory Gating Precision: PASSED
+  [Holdout 8/11] Token Estimator Limits: PASSED
+  [Holdout 9/11] Metacognitive Circuit Breaker Resilience: PASSED
+  [Holdout 10/11] FadeMem Biological Decay & Retention Math: PASSED
+  [Holdout 11/11] Soft-Constraint Budget Elasticity & Headroom: PASSED
+================ Holdout Benchmark Passed: 65/65 (100%) ================
 ```
 
 ### 3. Zero-Tolerance Memory Safety (ASan/UBSan)
@@ -397,7 +435,7 @@ Compiled and tested under AddressSanitizer and UndefinedBehaviorSanitizer:
 ```bash
 make clean && make test CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 ```
-**Result: 43/43 tests pass with 0 memory leaks, 0 heap buffer overflows, 0 undefined behavior.**
+**Result: 54/54 tests pass with 0 memory leaks, 0 heap buffer overflows, 0 undefined behavior.**
 
 
 ---
@@ -460,7 +498,7 @@ Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and
        ┌──────────────────────────┐     ┌──────────────────────────┐
        │   GitHub: M4F-S/Belya    │     │   GitHub: M4F-S/Almaz    │
        │   (Deterministic Core)   │     │  (Metamorphic Organism)  │
-       │       Tag: v7.1.0        │     │    Tag: v0.7.1-harden    │
+       │       Tag: v7.2.0        │     │        Tag: v0.8.0       │
        │     Path: /opt/charness  │     │     Path: /opt/almaz     │
        │    Service: belya.service│     │    Service: almaz.service│
        └────────────┬─────────────┘     └────────────┬─────────────┘
@@ -468,15 +506,15 @@ Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and
                     ▼                                ▼
         [Deterministic Software ]        [Autonomous Self-Evolving]
         [Engineering Workhorse  ]        [Self-Healing Organism   ]
-        [35 Tests / ASan Clean  ]        [43 Tests + 57 Holdouts  ]
-        [Production Deployments ]        [Watchdog + SARSI + VIGIL]
+        [41 Tests / ASan Clean  ]        [54 Tests + 65 Holdouts  ]
+        [Production Deployments ]        [FadeMem + CORAL + VIGIL ]
 ```
 
 ### 🧬 Sibling Lineage & Mutual Hardening
 - **Belya (The Deterministic Sibling & Software Engineering Core)**:
   Maintained in [`M4F-S/Belya`](https://github.com/M4F-S/Belya), deployed 24/7 on the VPS at `/opt/charness` (symlinked `/opt/belya`) as `belya.service`. Belya is the production engineering core designed for absolute predictability, deterministic test generation, and sub-millisecond execution. It serves as Almaz's rock-solid foundation, providing pristine reference architectures and security harness primitives.
 - **Almaz (The Metamorphic Sibling & Cognitive Organism)**:
-  Maintained in [`M4F-S/Almaz`](https://github.com/M4F-S/Almaz), deployed 24/7 on the VPS at `/opt/almaz` as `almaz.service` supervised by `almaz-watchdog`. Almaz takes Belya's deterministic foundation and elevates it into an autopoietic organism: a biological computing loop featuring a persistent self-model (SARSI), emotional appraisal dynamics (VIGIL), situational memory gating (KnowSelf), and Darwinian AST code mutation guarded by 57 hidden holdout assertions.
+  Maintained in [`M4F-S/Almaz`](https://github.com/M4F-S/Almaz), deployed 24/7 on the VPS at `/opt/almaz` as `almaz.service` supervised by `almaz-watchdog`. Almaz takes Belya's deterministic foundation and elevates it into an autopoietic organism: a biological computing loop featuring biological memory decay (FadeMem), dual-stream tactical/strategic memory routing (CORAL), semantic fact extraction (SimpleMem), a persistent self-model (SARSI), emotional appraisal dynamics (VIGIL), situational memory gating (KnowSelf), soft-constraint relaxation, and Darwinian AST code mutation guarded by 65 hidden holdout assertions.
 - **Continuous Cross-Sibling Co-Evolution**:
   Both siblings continuously exchange hardening advances. Security enhancements first proven in Belya (such as H4 orphaned tool message stripping, H5 SQLite WAL batching, and socket-level SSRF filters) are ported into Almaz. Conversely, telemetry innovations created in Almaz (such as H2 SSE usage accounting, linear streaming `memcpy` assembly, and Darwin compatibility) are backported to Belya. In the nightly arena benchmark, both siblings test mutations symmetrically without bias.
 

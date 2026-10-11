@@ -14,6 +14,37 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <math.h>
+
+double almaz_fademem_retention(time_t now, time_t last_acc, int access_count, double salience, double lambda) {
+    if (salience <= 0.0) return 0.0;
+    if (lambda < 0.0) lambda = 0.05;
+    double dt_days = 0.0;
+    if (now > last_acc && last_acc > 0) {
+        dt_days = (double)(now - last_acc) / 86400.0;
+    }
+    double alpha = 0.35;
+    double count_term = 1.0 + alpha * log(1.0 + (double)(access_count < 0 ? 0 : access_count));
+    if (count_term <= 0.001) count_term = 0.001;
+    double exponent = -(lambda * dt_days) / count_term;
+    double retention = salience * exp(exponent);
+    if (retention < 0.0) retention = 0.0;
+    return retention;
+}
+
+static void sqlite_fademem_retention(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc < 4) { sqlite3_result_null(ctx); return; }
+    time_t now = (time_t)sqlite3_value_int64(argv[0]);
+    if (now <= 0) now = time(NULL);
+    time_t last_acc = (time_t)sqlite3_value_int64(argv[1]);
+    if (last_acc <= 0) last_acc = now;
+    int count = sqlite3_value_int(argv[2]);
+    double salience = sqlite3_value_double(argv[3]);
+    double lambda = (argc >= 5 && sqlite3_value_type(argv[4]) != SQLITE_NULL) ? sqlite3_value_double(argv[4]) : 0.05;
+
+    double ret = almaz_fademem_retention(now, last_acc, count, salience, lambda);
+    sqlite3_result_double(ctx, ret);
+}
 
 /* R4 (2026-10-10): single source of truth for success rate, 0.0-1.0 ratio of
    tool successes to tool calls. Callers scale for display as needed. */
@@ -138,6 +169,15 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
             "  tool_calls_json TEXT,"
             "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
             ");"
+            "CREATE TABLE IF NOT EXISTS session_messages_archived ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  session_id TEXT,"
+            "  turn_idx INTEGER,"
+            "  role TEXT NOT NULL,"
+            "  content TEXT NOT NULL,"
+            "  tool_calls_json TEXT,"
+            "  archived_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
             "CREATE TABLE IF NOT EXISTS agent_checkpoints ("
             "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
             "  label TEXT,"
@@ -245,6 +285,59 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
         if (agent->has_fts5) {
             const char *m_fts_sql = "CREATE VIRTUAL TABLE IF NOT EXISTS agent_manifests_fts USING fts5(name, role, instructions, tools);";
             sqlite3_exec(agent->db, m_fts_sql, 0, 0, 0);
+        }
+
+        // Register custom scalar function for FadeMem Biological Memory Decay
+        sqlite3_create_function_v2(agent->db, "fademem_retention", -1, SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                   NULL, sqlite_fademem_retention, NULL, NULL, NULL);
+
+        // Initialize Phase 2 Memory Stores: Archive, Tactical, Strategic, Atomic Facts
+        const char *p2_sql =
+            "CREATE TABLE IF NOT EXISTS agent_memory_archive ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  original_id INTEGER,"
+            "  topic TEXT NOT NULL,"
+            "  content TEXT NOT NULL,"
+            "  wing TEXT,"
+            "  room TEXT,"
+            "  salience REAL,"
+            "  access_count INTEGER,"
+            "  archived_reason TEXT,"
+            "  archived_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE TABLE IF NOT EXISTS tactical_memory ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  session_id TEXT,"
+            "  task_id TEXT,"
+            "  trace_type TEXT NOT NULL,"
+            "  summary TEXT NOT NULL,"
+            "  details TEXT,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE TABLE IF NOT EXISTS strategic_memory ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  rubric_key TEXT UNIQUE NOT NULL,"
+            "  failure_mode TEXT NOT NULL,"
+            "  trigger_pattern TEXT NOT NULL,"
+            "  root_cause TEXT NOT NULL,"
+            "  corrective_guideline TEXT NOT NULL,"
+            "  promoted_from_task TEXT,"
+            "  application_count INTEGER DEFAULT 0,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");"
+            "CREATE TABLE IF NOT EXISTS atomic_facts ("
+            "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  entity_key TEXT NOT NULL,"
+            "  fact_text TEXT NOT NULL,"
+            "  source_turn INTEGER DEFAULT 0,"
+            "  timestamp_utc INTEGER NOT NULL,"
+            "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+            ");";
+        sqlite3_exec(agent->db, p2_sql, 0, 0, 0);
+
+        if (agent->has_fts5) {
+            const char *af_fts_sql = "CREATE VIRTUAL TABLE IF NOT EXISTS atomic_facts_fts USING fts5(entity_key, fact_text);";
+            sqlite3_exec(agent->db, af_fts_sql, 0, 0, 0);
         }
     }
 
@@ -533,7 +626,7 @@ char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
             "JOIN agent_memory_fts f ON m.rowid = f.rowid "
             "WHERE agent_memory_fts MATCH ? "
             "GROUP BY m.topic, m.content "
-            "ORDER BY (MAX(m.salience) * 1.5 - rank) DESC LIMIT 5;";
+            "ORDER BY ((-rank) * 0.55 + fademem_retention(strftime('%s', 'now'), strftime('%s', m.last_accessed_at), m.access_count, MAX(m.salience), 0.05) * 0.45) DESC LIMIT 5;";
         
         if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_text(stmt, 1, clean_q, -1, SQLITE_STATIC);
@@ -569,7 +662,7 @@ char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
         const char *sql = "SELECT id, topic, content, wing, room, MAX(salience), access_count "
                           "FROM agent_memory WHERE topic LIKE ? OR content LIKE ? OR wing LIKE ? OR room LIKE ? "
                           "GROUP BY topic, content "
-                          "ORDER BY MAX(salience) DESC, id DESC LIMIT 5;";
+                          "ORDER BY fademem_retention(strftime('%s', 'now'), strftime('%s', last_accessed_at), access_count, MAX(salience), 0.05) DESC, id DESC LIMIT 5;";
         if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
             char pattern[256];
             snprintf(pattern, sizeof(pattern), "%%%s%%", query ? query : "");
@@ -608,6 +701,338 @@ char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
     return out.data;
 }
 
+size_t almaz_fademem_prune_sweep(BelyaAgent *agent, double min_retention) {
+    if (!agent || !agent->db) return 0;
+    if (min_retention <= 0.0) min_retention = 0.15;
+    sqlite3 *db = agent->db;
+
+    const char *sel_sql =
+        "SELECT id, topic, content, wing, room, salience, access_count "
+        "FROM agent_memory "
+        "WHERE (wing IS NULL OR (wing != 'core_identity' AND wing != 'distilled_schemata')) "
+        "  AND (room IS NULL OR room != 'identity') "
+        "  AND fademem_retention(strftime('%s', 'now'), strftime('%s', last_accessed_at), access_count, salience, 0.05) < ?;";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sel_sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_double(stmt, 1, min_retention);
+
+    typedef struct {
+        int id;
+        char *topic;
+        char *content;
+        char *wing;
+        char *room;
+        double salience;
+        int access_count;
+    } PruneItem;
+
+    PruneItem items[64];
+    size_t count = 0;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW && count < 64) {
+        items[count].id = sqlite3_column_int(stmt, 0);
+        items[count].topic = xstrdup((const char *)sqlite3_column_text(stmt, 1));
+        items[count].content = xstrdup((const char *)sqlite3_column_text(stmt, 2));
+        const char *w = (const char *)sqlite3_column_text(stmt, 3);
+        const char *r = (const char *)sqlite3_column_text(stmt, 4);
+        items[count].wing = w ? xstrdup(w) : xstrdup("default");
+        items[count].room = r ? xstrdup(r) : xstrdup("general");
+        items[count].salience = sqlite3_column_double(stmt, 5);
+        items[count].access_count = sqlite3_column_int(stmt, 6);
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    for (size_t i = 0; i < count; i++) {
+        sqlite3_stmt *ins = NULL;
+        const char *ins_sql = "INSERT INTO agent_memory_archive (original_id, topic, content, wing, room, salience, access_count, archived_reason) VALUES (?, ?, ?, ?, ?, ?, ?, 'fademem_decay');";
+        if (sqlite3_prepare_v2(db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(ins, 1, items[i].id);
+            sqlite3_bind_text(ins, 2, items[i].topic, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 3, items[i].content, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 4, items[i].wing, -1, SQLITE_STATIC);
+            sqlite3_bind_text(ins, 5, items[i].room, -1, SQLITE_STATIC);
+            sqlite3_bind_double(ins, 6, items[i].salience);
+            sqlite3_bind_int(ins, 7, items[i].access_count);
+            sqlite3_step(ins);
+            sqlite3_finalize(ins);
+        }
+
+        sqlite3_stmt *del = NULL;
+        if (sqlite3_prepare_v2(db, "DELETE FROM agent_memory WHERE id = ?;", -1, &del, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(del, 1, items[i].id);
+            sqlite3_step(del);
+            sqlite3_finalize(del);
+        }
+
+        if (agent->has_fts5) {
+            sqlite3_stmt *del_fts = NULL;
+            if (sqlite3_prepare_v2(db, "DELETE FROM agent_memory_fts WHERE rowid = ?;", -1, &del_fts, NULL) == SQLITE_OK) {
+                sqlite3_bind_int(del_fts, 1, items[i].id);
+                sqlite3_step(del_fts);
+                sqlite3_finalize(del_fts);
+            }
+        }
+
+        free(items[i].topic);
+        free(items[i].content);
+        free(items[i].wing);
+        free(items[i].room);
+    }
+
+    if (count > 0) {
+        char log_buf[128];
+        snprintf(log_buf, sizeof(log_buf), "FadeMem pruned %zu decaying memory records (< %.2f)", count, min_retention);
+        belya_agent_log_timeline(agent, "fademem_pruned", log_buf);
+    }
+    return count;
+}
+
+size_t almaz_concept_fusion_sweep(BelyaAgent *agent) {
+    if (!agent || !agent->db) return 0;
+    sqlite3 *db = agent->db;
+
+    const char *cluster_sql =
+        "SELECT wing, room, COUNT(*) as cnt "
+        "FROM agent_memory "
+        "WHERE (wing IS NULL OR (wing != 'core_identity' AND wing != 'distilled_schemata')) "
+        "  AND (room IS NULL OR room != 'identity') "
+        "GROUP BY wing, room "
+        "HAVING cnt >= 5 "
+        "ORDER BY cnt DESC LIMIT 1;";
+
+    sqlite3_stmt *c_stmt = NULL;
+    if (sqlite3_prepare_v2(db, cluster_sql, -1, &c_stmt, NULL) != SQLITE_OK) return 0;
+
+    char cluster_wing[64] = {0};
+    char cluster_room[64] = {0};
+    int cluster_count = 0;
+
+    if (sqlite3_step(c_stmt) == SQLITE_ROW) {
+        const char *w = (const char *)sqlite3_column_text(c_stmt, 0);
+        const char *r = (const char *)sqlite3_column_text(c_stmt, 1);
+        cluster_count = sqlite3_column_int(c_stmt, 2);
+        snprintf(cluster_wing, sizeof(cluster_wing), "%s", w ? w : "default");
+        snprintf(cluster_room, sizeof(cluster_room), "%s", r ? r : "general");
+    }
+    sqlite3_finalize(c_stmt);
+
+    if (cluster_count < 5) return 0;
+
+    const char *sel_sql = "SELECT id, topic, content FROM agent_memory WHERE wing = ? AND room = ? LIMIT 10;";
+    sqlite3_stmt *s_stmt = NULL;
+    if (sqlite3_prepare_v2(db, sel_sql, -1, &s_stmt, NULL) != SQLITE_OK) return 0;
+    sqlite3_bind_text(s_stmt, 1, cluster_wing, -1, SQLITE_STATIC);
+    sqlite3_bind_text(s_stmt, 2, cluster_room, -1, SQLITE_STATIC);
+
+    DynString fusion_ds = dyn_str_new();
+    dyn_str_appendf(&fusion_ds, "Synthesized Invariant Schemata distilled from %d episodes in [%s/%s]:\n", cluster_count, cluster_wing, cluster_room);
+
+    int ids_to_archive[16];
+    size_t fetched = 0;
+
+    while (sqlite3_step(s_stmt) == SQLITE_ROW && fetched < 16) {
+        ids_to_archive[fetched] = sqlite3_column_int(s_stmt, 0);
+        const char *t = (const char *)sqlite3_column_text(s_stmt, 1);
+        const char *c = (const char *)sqlite3_column_text(s_stmt, 2);
+        dyn_str_appendf(&fusion_ds, "- Principle %zu: %s — %s\n", fetched + 1, t ? t : "Episode", c ? c : "");
+        fetched++;
+    }
+    sqlite3_finalize(s_stmt);
+
+    if (fetched < 5) {
+        free(fusion_ds.data);
+        return 0;
+    }
+
+    char fused_topic[128];
+    snprintf(fused_topic, sizeof(fused_topic), "Invariant Schema: %s/%s", cluster_wing, cluster_room);
+    belya_agent_persist_memory_scoped(agent, fused_topic, fusion_ds.data, "distilled_schemata", cluster_room);
+    free(fusion_ds.data);
+
+    sqlite3_stmt *bst_stmt = NULL;
+    if (sqlite3_prepare_v2(db, "UPDATE agent_memory SET salience = 2.0 WHERE topic = ? AND wing = 'distilled_schemata';", -1, &bst_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(bst_stmt, 1, fused_topic, -1, SQLITE_STATIC);
+        sqlite3_step(bst_stmt);
+        sqlite3_finalize(bst_stmt);
+    }
+
+    for (size_t i = 0; i < fetched; i++) {
+        sqlite3_stmt *ins = NULL;
+        const char *ins_sql = "INSERT INTO agent_memory_archive (original_id, topic, content, wing, room, salience, access_count, archived_reason) "
+                              "SELECT id, topic, content, wing, room, salience, access_count, 'concept_fusion_consolidated' FROM agent_memory WHERE id = ?;";
+        if (sqlite3_prepare_v2(db, ins_sql, -1, &ins, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(ins, 1, ids_to_archive[i]);
+            sqlite3_step(ins);
+            sqlite3_finalize(ins);
+        }
+        sqlite3_stmt *del = NULL;
+        if (sqlite3_prepare_v2(db, "DELETE FROM agent_memory WHERE id = ?;", -1, &del, NULL) == SQLITE_OK) {
+            sqlite3_bind_int(del, 1, ids_to_archive[i]);
+            sqlite3_step(del);
+            sqlite3_finalize(del);
+        }
+    }
+
+    char log_buf[128];
+    snprintf(log_buf, sizeof(log_buf), "Subconscious Concept Fusion: distilled %zu episodes into [%s]", fetched, fused_topic);
+    belya_agent_log_timeline(agent, "concept_fusion_complete", log_buf);
+
+    return fetched;
+}
+
+void almaz_coral_record_tactical(BelyaAgent *agent, const char *task_id, const char *trace_type, const char *summary, const char *details) {
+    if (!agent || !agent->db || !summary) return;
+    const char *sql = "INSERT INTO tactical_memory (session_id, task_id, trace_type, summary, details) VALUES (?, ?, ?, ?, ?);";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, "default", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, task_id ? task_id : "current", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 3, trace_type ? trace_type : "trace", -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 4, summary, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 5, details ? details : "", -1, SQLITE_STATIC);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+}
+
+bool almaz_coral_promote_strategic(BelyaAgent *agent, const char *rubric_key, const char *failure_mode, const char *trigger_pattern, const char *root_cause, const char *guideline, const char *source_task) {
+    if (!agent || !agent->db || !rubric_key || !failure_mode || !guideline) return false;
+    const char *sql =
+        "INSERT INTO strategic_memory (rubric_key, failure_mode, trigger_pattern, root_cause, corrective_guideline, promoted_from_task, application_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0) "
+        "ON CONFLICT(rubric_key) DO UPDATE SET "
+        "  failure_mode = excluded.failure_mode, "
+        "  trigger_pattern = excluded.trigger_pattern, "
+        "  root_cause = excluded.root_cause, "
+        "  corrective_guideline = excluded.corrective_guideline, "
+        "  application_count = application_count + 1;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(stmt, 1, rubric_key, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, failure_mode, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, trigger_pattern ? trigger_pattern : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, root_cause ? root_cause : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, guideline, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, source_task ? source_task : "unknown", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE);
+}
+
+char *almaz_coral_query_strategic(BelyaAgent *agent, const char *pattern) {
+    if (!agent || !agent->db) return xstrdup("Strategic memory not initialized.");
+    DynString ds = dyn_str_new();
+    const char *sql;
+    sqlite3_stmt *stmt = NULL;
+
+    if (pattern && strlen(pattern) > 0) {
+        sql = "SELECT rubric_key, failure_mode, trigger_pattern, root_cause, corrective_guideline, application_count "
+              "FROM strategic_memory "
+              "WHERE rubric_key LIKE ? OR failure_mode LIKE ? OR trigger_pattern LIKE ? "
+              "ORDER BY application_count DESC, id DESC LIMIT 5;";
+        if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            char pat[256];
+            snprintf(pat, sizeof(pat), "%%%s%%", pattern);
+            sqlite3_bind_text(stmt, 1, pat, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, pat, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, pat, -1, SQLITE_STATIC);
+        }
+    } else {
+        sql = "SELECT rubric_key, failure_mode, trigger_pattern, root_cause, corrective_guideline, application_count "
+              "FROM strategic_memory "
+              "ORDER BY application_count DESC, id DESC LIMIT 5;";
+        sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL);
+    }
+
+    if (stmt) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char *key = (const char *)sqlite3_column_text(stmt, 0);
+            const char *mode = (const char *)sqlite3_column_text(stmt, 1);
+            const char *trig = (const char *)sqlite3_column_text(stmt, 2);
+            const char *cause = (const char *)sqlite3_column_text(stmt, 3);
+            const char *guide = (const char *)sqlite3_column_text(stmt, 4);
+            int app_cnt = sqlite3_column_int(stmt, 5);
+            dyn_str_appendf(&ds, "### [CORAL Rubric: %s (Used: %d)]\n- Failure Mode: %s\n- Trigger: %s\n- Root Cause: %s\n- Corrective Guideline: %s\n\n",
+                            key ? key : "unknown", app_cnt, mode ? mode : "", trig ? trig : "", cause ? cause : "", guide ? guide : "");
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    if (ds.len == 0) dyn_str_append(&ds, "No matching strategic rubrics found.");
+    return ds.data;
+}
+
+void almaz_simplemem_record_fact(BelyaAgent *agent, const char *entity_key, const char *fact_text, int turn) {
+    if (!agent || !agent->db || !entity_key || !fact_text) return;
+    const char *sql = "INSERT INTO atomic_facts (entity_key, fact_text, source_turn, timestamp_utc) VALUES (?, ?, ?, strftime('%s', 'now'));";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, entity_key, -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt, 2, fact_text, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 3, turn);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    if (agent->has_fts5) {
+        const char *fts_sql = "INSERT INTO atomic_facts_fts (entity_key, fact_text) VALUES (?, ?);";
+        if (sqlite3_prepare_v2(agent->db, fts_sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, entity_key, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, fact_text, -1, SQLITE_STATIC);
+            sqlite3_step(stmt);
+            sqlite3_finalize(stmt);
+        }
+    }
+}
+
+char *almaz_simplemem_query_facts(BelyaAgent *agent, const char *entity_key, const char *query) {
+    if (!agent || !agent->db) return xstrdup("Atomic facts store not active.");
+    DynString ds = dyn_str_new();
+
+    if (entity_key && strlen(entity_key) > 0) {
+        sqlite3_stmt *stmt = NULL;
+        const char *sql = "SELECT entity_key, fact_text, source_turn, datetime(timestamp_utc, 'unixepoch') FROM atomic_facts WHERE entity_key = ? ORDER BY id DESC LIMIT 5;";
+        if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, entity_key, -1, SQLITE_STATIC);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *ek = (const char *)sqlite3_column_text(stmt, 0);
+                const char *ft = (const char *)sqlite3_column_text(stmt, 1);
+                int t = sqlite3_column_int(stmt, 2);
+                const char *ts = (const char *)sqlite3_column_text(stmt, 3);
+                dyn_str_appendf(&ds, "- [%s | Turn %d | %s]: %s\n", ek ? ek : "", t, ts ? ts : "", ft ? ft : "");
+            }
+            sqlite3_finalize(stmt);
+        }
+    }
+
+    if (query && strlen(query) > 0 && agent->has_fts5) {
+        char *clean_q = sanitize_fts5_query(query);
+        sqlite3_stmt *stmt = NULL;
+        const char *fts_sql = "SELECT a.entity_key, a.fact_text, a.source_turn, datetime(a.timestamp_utc, 'unixepoch') "
+                              "FROM atomic_facts a JOIN atomic_facts_fts f ON a.rowid = f.rowid "
+                              "WHERE atomic_facts_fts MATCH ? ORDER BY rank LIMIT 5;";
+        if (sqlite3_prepare_v2(agent->db, fts_sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, clean_q, -1, SQLITE_STATIC);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *ek = (const char *)sqlite3_column_text(stmt, 0);
+                const char *ft = (const char *)sqlite3_column_text(stmt, 1);
+                int t = sqlite3_column_int(stmt, 2);
+                const char *ts = (const char *)sqlite3_column_text(stmt, 3);
+                if (!strstr(ds.data, ft ? ft : "---")) {
+                    dyn_str_appendf(&ds, "- [FTS: %s | Turn %d | %s]: %s\n", ek ? ek : "", t, ts ? ts : "", ft ? ft : "");
+                }
+            }
+            sqlite3_finalize(stmt);
+        }
+        free(clean_q);
+    }
+
+    if (ds.len == 0) dyn_str_append(&ds, "No matching atomic facts found.");
+    return ds.data;
+}
+
 void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent) {
     if (!agent || agent->msg_count <= 1 + keep_recent) return;
 
@@ -632,6 +1057,118 @@ void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent) {
         agent->messages[1 + i] = agent->messages[start + i];
     }
     agent->msg_count = 1 + remaining;
+}
+
+void belya_agent_compact_history_middle_out(BelyaAgent *agent, size_t keep_recent) {
+    if (!agent || agent->msg_count <= 2 + keep_recent) return;
+
+    /*
+       Late-2026 Root Intent Pinning & Middle-Out Semantic Compaction:
+       Index 0: System instructions (PINNED)
+       Index 1: Root user objective (PINNED)
+       Index 2 ... (drop_end - 1): Intermediate turns to compress & archive losslessly
+       Index drop_end ... (msg_count - 1): Recent working window
+    */
+    size_t drop_end = agent->msg_count - keep_recent;
+    if (drop_end <= 2) return;
+
+    // Archive intermediate messages into SQLite session_messages_archived
+    if (agent->db) {
+        sqlite3_exec(agent->db, "BEGIN IMMEDIATE;", 0, 0, 0);
+        sqlite3_stmt *stmt = NULL;
+        const char *ins_sql = "INSERT INTO session_messages_archived (session_id, turn_idx, role, content, tool_calls_json) VALUES ('active', ?, ?, ?, ?);";
+        if (sqlite3_prepare_v2(agent->db, ins_sql, -1, &stmt, NULL) == SQLITE_OK) {
+            for (size_t i = 2; i < drop_end; i++) {
+                sqlite3_bind_int(stmt, 1, (int)i);
+                sqlite3_bind_text(stmt, 2, agent->messages[i].role ? agent->messages[i].role : "unknown", -1, SQLITE_STATIC);
+                sqlite3_bind_text(stmt, 3, agent->messages[i].content ? agent->messages[i].content : "", -1, SQLITE_STATIC);
+                if (agent->messages[i].tool_calls && agent->messages[i].tool_call_count > 0) {
+                    JsonValue *arr = json_create_array();
+                    for (size_t t = 0; t < agent->messages[i].tool_call_count; t++) {
+                        JsonValue *tc_obj = json_create_object();
+                        json_obj_add(tc_obj, "name", json_create_string(agent->messages[i].tool_calls[t].name ? agent->messages[i].tool_calls[t].name : ""));
+                        json_obj_add(tc_obj, "arguments", json_create_string(agent->messages[i].tool_calls[t].arguments_json ? agent->messages[i].tool_calls[t].arguments_json : ""));
+                        json_arr_add(arr, tc_obj);
+                    }
+                    char *tc_str = json_serialize(arr);
+                    sqlite3_bind_text(stmt, 4, tc_str, -1, SQLITE_TRANSIENT);
+                    free(tc_str);
+                    json_free(arr);
+                } else {
+                    sqlite3_bind_null(stmt, 4);
+                }
+                sqlite3_step(stmt);
+                sqlite3_reset(stmt);
+            }
+            sqlite3_finalize(stmt);
+        }
+        sqlite3_exec(agent->db, "COMMIT;", 0, 0, 0);
+    }
+
+    // Synthesize intermediate summary text
+    size_t user_turns = 0, assistant_turns = 0, tool_turns = 0;
+    DynString tools_used = dyn_str_new();
+    for (size_t i = 2; i < drop_end; i++) {
+        if (!agent->messages[i].role) continue;
+        if (strcmp(agent->messages[i].role, "user") == 0) user_turns++;
+        else if (strcmp(agent->messages[i].role, "assistant") == 0) {
+            assistant_turns++;
+            if (agent->messages[i].tool_calls) {
+                for (size_t t = 0; t < agent->messages[i].tool_call_count; t++) {
+                    const char *tname = agent->messages[i].tool_calls[t].name;
+                    if (tname && !strstr(tools_used.data ? tools_used.data : "", tname)) {
+                        if (tools_used.len > 0) dyn_str_append(&tools_used, ", ");
+                        dyn_str_append(&tools_used, tname);
+                    }
+                }
+            }
+        }
+        else if (strcmp(agent->messages[i].role, "tool") == 0) tool_turns++;
+    }
+
+    DynString summary = dyn_str_new();
+    dyn_str_appendf(&summary,
+        "[CONTEXT COMPACTOR: INTERMEDIATE TURNS 2-%zu COMPRESSED]\n"
+        "- Summary: Compressed %zu intermediate turns (%zu user inputs, %zu assistant reasoning steps, %zu tool outputs).\n"
+        "- Tools Executed: %s\n"
+        "- Status: Root mission constraints pinned; full intermediate traces archived in SQLite session_messages_archived.",
+        drop_end - 1, drop_end - 2, user_turns, assistant_turns, tool_turns,
+        tools_used.len > 0 ? tools_used.data : "none");
+    dyn_str_free(&tools_used);
+
+    // Free intermediate messages
+    for (size_t i = 2; i < drop_end; i++) {
+        free_single_message(&agent->messages[i]);
+    }
+
+    // Enforce H4 orphan tool filter on the start of the recent window
+    size_t start = drop_end;
+    while (start < agent->msg_count &&
+           agent->messages[start].role &&
+           strcmp(agent->messages[start].role, "tool") == 0) {
+        free_single_message(&agent->messages[start]);
+        start++;
+    }
+
+    // Create the compressed summary message at index 2
+    BelyaMessage summary_msg;
+    memset(&summary_msg, 0, sizeof(summary_msg));
+    summary_msg.role = xstrdup("assistant");
+    summary_msg.content = summary.data;
+    summary_msg.tool_call_id = NULL;
+    summary_msg.tool_calls = NULL;
+    summary_msg.tool_call_count = 0;
+
+    agent->messages[2] = summary_msg;
+
+    // Shift recent messages after index 2
+    size_t recent_count = agent->msg_count - start;
+    for (size_t i = 0; i < recent_count; i++) {
+        agent->messages[3 + i] = agent->messages[start + i];
+    }
+    agent->msg_count = 3 + recent_count;
+
+    belya_agent_log_timeline(agent, "context_compaction_middle_out", "Compacted intermediate turns with root intent pinning");
 }
 
 void belya_agent_clear_history(BelyaAgent *agent) {
@@ -1794,10 +2331,15 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         }
         size_t est_tokens = belya_agent_total_tokens(agent);
         size_t budget = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
-        if (est_tokens > ((budget / 100) * agent->compaction_percent) && agent->msg_count > agent->compaction_keep) {
-            keep = agent->compaction_keep;
+        size_t token_threshold = (budget >= 128000) ? 96000 : ((budget / 100) * agent->compaction_percent);
+        if (est_tokens >= token_threshold && agent->msg_count > (agent->compaction_keep > 0 ? agent->compaction_keep : 15)) {
+            keep = agent->compaction_keep > 0 ? agent->compaction_keep : 15;
             needs_compaction = true;
-            reason = "token budget threshold";
+            reason = "token budget threshold (96k SOTA guard)";
+        } else if (agent->turn_count >= 100 && agent->msg_count > 20) {
+            keep = 15;
+            needs_compaction = true;
+            reason = "turn limit attractor guard (100 turns)";
         }
 
         if (needs_compaction && agent->db) {
@@ -1850,8 +2392,8 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
                 belya_agent_log_timeline(agent, "memory_before_compaction", topic);
             }
 
-            // Now compact
-            belya_agent_compact_history(agent, keep);
+            // Now perform middle-out compaction with root intent pinning & lossless archival
+            belya_agent_compact_history_middle_out(agent, keep);
 
             // Log the compaction
             char comp_msg[128];

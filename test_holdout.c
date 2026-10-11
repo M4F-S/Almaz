@@ -8,6 +8,7 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
+#include <math.h>
 
 static int g_holdout_passed = 0;
 static int g_holdout_total = 0;
@@ -198,34 +199,78 @@ static void test_circuit_breaker_resilience(void) {
     if (alert) { free(alert); alert = NULL; }
 }
 
+static void test_fademem_biological_retention_holdout(void) {
+    time_t now = time(NULL);
+
+    // 1. Retention at t=0 equals salience exactly
+    double r0 = almaz_fademem_retention(now, now, 0, 1.0, 0.05);
+    HOLDOUT_ASSERT(fabs(r0 - 1.0) < 1e-4, "Retention at delta-t=0 equals salience exactly");
+
+    // 2. Negative delta-time clamps to 0
+    double r_future = almaz_fademem_retention(now, now + 1000, 0, 1.0, 0.05);
+    HOLDOUT_ASSERT(fabs(r_future - 1.0) < 1e-4, "Future timestamps clamp delta-t to 0");
+
+    // 3. Zero salience returns 0.0
+    double r_zero_sal = almaz_fademem_retention(now, now, 0, 0.0, 0.05);
+    HOLDOUT_ASSERT(fabs(r_zero_sal - 0.0) < 1e-4, "Zero salience returns zero retention");
+
+    // 4. Salience scale proportionality
+    double r_sal1 = almaz_fademem_retention(now, now - 864000, 5, 1.0, 0.05);
+    double r_sal2 = almaz_fademem_retention(now, now - 864000, 5, 2.0, 0.05);
+    HOLDOUT_ASSERT(fabs(r_sal2 - (2.0 * r_sal1)) < 1e-4, "Retention is linear in salience scale");
+
+    // 5. Spacing effect: frequent accesses significantly reduce decay rate
+    time_t t_30d = now - (30 * 86400);
+    double r_stale = almaz_fademem_retention(now, t_30d, 0, 1.0, 0.05);
+    double r_reinforced = almaz_fademem_retention(now, t_30d, 50, 1.0, 0.05);
+    HOLDOUT_ASSERT(r_reinforced > (r_stale * 2.0), "50 accesses over 30 days increases retention by >2.0x vs 0 accesses");
+
+    // 6. Monotonic temporal decay
+    double r_10d = almaz_fademem_retention(now, now - (10 * 86400), 2, 1.0, 0.05);
+    double r_20d = almaz_fademem_retention(now, now - (20 * 86400), 2, 1.0, 0.05);
+    double r_30d = almaz_fademem_retention(now, now - (30 * 86400), 2, 1.0, 0.05);
+    HOLDOUT_ASSERT(r_10d > r_20d && r_20d > r_30d, "Decay is strictly monotonic over increasing delta-time");
+
+    // 7. Numerical stability under extreme access counts
+    double r_extreme = almaz_fademem_retention(now, now - (365 * 86400), 100000, 1.0, 0.05);
+    HOLDOUT_ASSERT(r_extreme > 0.0 && r_extreme <= 1.0, "Extreme access count (100k) remains bounded in [0, 1]");
+
+    // 8. Lambda zero returns salience
+    double r_no_decay = almaz_fademem_retention(now, now - (100 * 86400), 0, 1.0, 0.0);
+    HOLDOUT_ASSERT(fabs(r_no_decay - 1.0) < 1e-4, "Zero decay rate lambda returns base salience");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Hidden Holdout Benchmark Suite ================\n");
     test_dyn_string_boundary();
-    printf("  [Holdout 1/9] DynString Boundaries: PASSED\n");
+    printf("  [Holdout 1/10] DynString Boundaries: PASSED\n");
 
     test_json_depth_and_escaping();
-    printf("  [Holdout 2/9] MiniJSON Depth & Escaping: PASSED\n");
+    printf("  [Holdout 2/10] MiniJSON Depth & Escaping: PASSED\n");
 
     test_frontmatter_delimiters();
-    printf("  [Holdout 3/9] YAML Frontmatter CRLF Delimiters: PASSED\n");
+    printf("  [Holdout 3/10] YAML Frontmatter CRLF Delimiters: PASSED\n");
 
     test_path_jailing();
-    printf("  [Holdout 4/9] Workspace Path Jailing: PASSED\n");
+    printf("  [Holdout 4/10] Workspace Path Jailing: PASSED\n");
 
     test_self_model_lifecycle();
-    printf("  [Holdout 5/9] SARSI Self-Model Lifecycle: PASSED\n");
+    printf("  [Holdout 5/10] SARSI Self-Model Lifecycle: PASSED\n");
 
     test_emotional_appraisal_clamping();
-    printf("  [Holdout 6/9] Emotional Appraisal Dynamic Clamping: PASSED\n");
+    printf("  [Holdout 6/10] Emotional Appraisal Dynamic Clamping: PASSED\n");
 
     test_memory_gating_precision();
-    printf("  [Holdout 7/9] KnowSelf Memory Gating Precision: PASSED\n");
+    printf("  [Holdout 7/10] KnowSelf Memory Gating Precision: PASSED\n");
 
     test_token_estimator_limits();
-    printf("  [Holdout 8/9] Token Estimator Limits: PASSED\n");
+    printf("  [Holdout 8/10] Token Estimator Limits: PASSED\n");
 
     test_circuit_breaker_resilience();
-    printf("  [Holdout 9/9] Metacognitive Circuit Breaker Resilience: PASSED\n");
+    printf("  [Holdout 9/10] Metacognitive Circuit Breaker Resilience: PASSED\n");
+
+    test_fademem_biological_retention_holdout();
+    printf("  [Holdout 10/10] FadeMem Biological Retention Bounds: PASSED\n");
 
     printf("================ Holdout Benchmark Passed: %d/%d (100%%) ================\n\n", g_holdout_passed, g_holdout_total);
     return 0;

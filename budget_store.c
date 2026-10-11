@@ -98,9 +98,10 @@ int budget_state_save(const char *path, const BudgetState *bs) {
     return rename(tmp, path) == 0 ? 0 : -1;
 }
 
-bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
-                          long prompt_tokens, long completion_tokens,
-                          long cached_tokens, long duration_sec, bool *sealed) {
+bool budget_state_consume_with_headroom(BudgetState *bs, const BudgetLimits *lim,
+                                       long prompt_tokens, long completion_tokens,
+                                       long cached_tokens, long duration_sec,
+                                       bool emergency_headroom, bool *sealed) {
     if (!bs || !lim) return false;
     if (sealed) *sealed = false;
     if (!day_matches(bs)) budget_state_reset_day(bs);
@@ -110,14 +111,15 @@ bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
     double cost = (double)costed_in / 1e6 * lim->in_rate_per_m +
                   (double)costed_out / 1e6 * lim->out_rate_per_m;
 
+    double multiplier = emergency_headroom ? 1.05 : 1.00;
     bool would_exceed = false;
-    if (lim->daily_tokens > 0 && bs->tokens_used + prompt_tokens + completion_tokens > lim->daily_tokens) {
+    if (lim->daily_tokens > 0 && bs->tokens_used + prompt_tokens + completion_tokens > (long)(lim->daily_tokens * multiplier)) {
         would_exceed = true;
     }
-    if (lim->daily_cost > 0 && bs->cost_used + cost > lim->daily_cost) {
+    if (lim->daily_cost > 0 && bs->cost_used + cost > (lim->daily_cost * multiplier)) {
         would_exceed = true;
     }
-    if (lim->daily_seconds > 0 && bs->runtime_sec + duration_sec > lim->daily_seconds) {
+    if (lim->daily_seconds > 0 && bs->runtime_sec + duration_sec > (long)(lim->daily_seconds * multiplier)) {
         would_exceed = true;
     }
 
@@ -139,8 +141,14 @@ bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
     bs->cost_used += cost;
     bs->runtime_sec += duration_sec;
 
-    if (lim->daily_tokens > 0 && bs->tokens_used >= lim->daily_tokens) { bs->sealed = 1; if (sealed) *sealed = true; }
-    if (lim->daily_cost > 0 && bs->cost_used >= lim->daily_cost) { bs->sealed = 1; if (sealed) *sealed = true; }
-    if (lim->daily_seconds > 0 && bs->runtime_sec >= lim->daily_seconds) { bs->sealed = 1; if (sealed) *sealed = true; }
+    if (lim->daily_tokens > 0 && bs->tokens_used >= (long)(lim->daily_tokens * multiplier)) { bs->sealed = 1; if (sealed) *sealed = true; }
+    if (lim->daily_cost > 0 && bs->cost_used >= (lim->daily_cost * multiplier)) { bs->sealed = 1; if (sealed) *sealed = true; }
+    if (lim->daily_seconds > 0 && bs->runtime_sec >= (long)(lim->daily_seconds * multiplier)) { bs->sealed = 1; if (sealed) *sealed = true; }
     return true;
+}
+
+bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
+                          long prompt_tokens, long completion_tokens,
+                          long cached_tokens, long duration_sec, bool *sealed) {
+    return budget_state_consume_with_headroom(bs, lim, prompt_tokens, completion_tokens, cached_tokens, duration_sec, false, sealed);
 }

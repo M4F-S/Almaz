@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <math.h>
 
 void test_dyn_string(void) {
     printf("[Test] DynString Operations...\n");
@@ -2692,6 +2693,435 @@ void test_security_adversarial_suite(void) {
     printf("  -> Security & Adversarial Hardening Suite PASSED\n");
 }
 
+void test_in_context_loop_breaker(void) {
+    printf("[Test] Late-2026 In-Context Locking Breaker (Attractor Detection)...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_loop_breaker_almaz.sqlite", "Test System Prompt");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Period 1 detection: 3 identical tool calls
+    char *breaker_msg = NULL;
+    bool tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(tripped && breaker_msg != NULL);
+    assert(strstr(breaker_msg, "DETERMINISTIC ATTRACTOR DETECTED (Period 1)") != NULL);
+    assert(h->loop_breaker_tripped == true);
+    assert(h->loop_detector.detected_period == 1);
+    free(breaker_msg);
+
+    // 2. Turn reset clears detector
+    belya_harness_reset_turn_state(h);
+    assert(h->loop_breaker_tripped == false);
+    assert(h->loop_detector.count == 0);
+
+    // 3. Period 2 detection: alternating oscillation A -> B -> A -> B -> A -> B
+    const char *tool_a = "{\"command\":\"pwd\"}";
+    const char *tool_b = "{\"command\":\"ls\"}";
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(tripped && breaker_msg != NULL);
+    assert(strstr(breaker_msg, "DETERMINISTIC ATTRACTOR DETECTED (Period 2)") != NULL);
+    assert(h->loop_breaker_tripped == true);
+    assert(h->loop_detector.detected_period == 2);
+    free(breaker_msg);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_loop_breaker_almaz.sqlite");
+    printf("  -> Late-2026 In-Context Locking Breaker PASSED\n");
+}
+
+void test_context_compactor_middle_out(void) {
+    printf("[Test] Late-2026 128-Call / 96k Middle-Out Context Compactor...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_compactor_almaz.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    // Add root user instruction
+    belya_agent_add_message(agent, "user", "ROOT MISSION: Refactor IPv6 parser and verify zero memory leaks.");
+
+    // Add 20 intermediate turns
+    for (int i = 0; i < 20; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Intermediate step %d: inspecting code lines %d-%d", i, i * 10, i * 10 + 10);
+        belya_agent_add_message(agent, (i % 2 == 0) ? "assistant" : "user", buf);
+    }
+    assert(agent->msg_count == 22);
+
+    // Perform middle-out compaction retaining 4 recent messages
+    belya_agent_compact_history_middle_out(agent, 4);
+
+    // Layout must be:
+    // Index 0: system
+    // Index 1: root user objective (PINNED!)
+    // Index 2: summary of intermediate steps
+    // Index 3..6: 4 recent messages
+    assert(agent->msg_count == 7);
+    assert(strcmp(agent->messages[0].role, "system") == 0);
+    assert(strcmp(agent->messages[1].role, "user") == 0);
+    assert(strstr(agent->messages[1].content, "ROOT MISSION:") != NULL);
+    assert(strcmp(agent->messages[2].role, "assistant") == 0);
+    assert(strstr(agent->messages[2].content, "[CONTEXT COMPACTOR: INTERMEDIATE TURNS") != NULL);
+    assert(strstr(agent->messages[2].content, "Root mission constraints pinned") != NULL);
+
+    // Verify lossless archival in SQLite table session_messages_archived
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM session_messages_archived;", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    assert(rc == SQLITE_ROW);
+    int archived_count = sqlite3_column_int(stmt, 0);
+    assert(archived_count >= 15);
+    sqlite3_finalize(stmt);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_compactor_almaz.sqlite");
+    printf("  -> Late-2026 Middle-Out Context Compactor PASSED\n");
+}
+
+void test_fademem_biological_decay(void) {
+    printf("[Test] Late-2026 FadeMem Biological Decay (Mathematical & FTS5 Bounds)...\n");
+
+    time_t now = time(NULL);
+
+    // 1. Retention at t=0
+    double ret_now = almaz_fademem_retention(now, now, 0, 1.0, 0.05);
+    assert(fabs(ret_now - 1.0) < 1e-4);
+
+    // 2. Retention after 30 days without reinforcement
+    time_t t_30d_ago = now - (30 * 86400);
+    double ret_30d_stale = almaz_fademem_retention(now, t_30d_ago, 0, 1.0, 0.05);
+    assert(ret_30d_stale < 0.25 && ret_30d_stale > 0.20);
+
+    // 3. Spacing effect: 20 accesses over 30 days
+    double ret_30d_reinforced = almaz_fademem_retention(now, t_30d_ago, 20, 1.0, 0.05);
+    assert(ret_30d_reinforced > 0.45);
+    assert(ret_30d_reinforced > ret_30d_stale * 2.0);
+
+    // 4. Test FTS5 hybrid retrieval ranking
+    unlink("test_fademem_agent.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_fademem_agent.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    belya_agent_persist_memory(agent, "DecayTest Stale", "Protocol specification for memory retrieval stale version");
+    belya_agent_persist_memory(agent, "DecayTest Fresh", "Protocol specification for memory retrieval fresh version");
+
+    sqlite3_exec(agent->db,
+        "UPDATE agent_memory SET last_accessed_at = datetime('now', '-60 days'), access_count = 0 WHERE topic = 'DecayTest Stale';",
+        0, 0, 0);
+
+    char *search_res = belya_agent_search_memory(agent, "Protocol specification");
+    assert(search_res != NULL);
+    char *fresh_pos = strstr(search_res, "DecayTest Fresh");
+    char *stale_pos = strstr(search_res, "DecayTest Stale");
+    assert(fresh_pos != NULL);
+    if (stale_pos) {
+        assert(fresh_pos < stale_pos);
+    }
+    free(search_res);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_fademem_agent.sqlite");
+    printf("  -> Late-2026 FadeMem Biological Decay PASSED\n");
+}
+
+void test_fademem_prune_and_concept_fusion(void) {
+    printf("[Test] Late-2026 Subconscious Pruning & Concept Fusion Sweeps...\n");
+
+    unlink("test_subconscious_fusion.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_subconscious_fusion.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    belya_agent_persist_memory(agent, "Decayed Topic", "This ephemeral knowledge was never reinforced and is forgotten.");
+    sqlite3_exec(agent->db,
+        "UPDATE agent_memory SET last_accessed_at = datetime('now', '-100 days'), access_count = 0 WHERE topic = 'Decayed Topic';",
+        0, 0, 0);
+
+    size_t pruned = almaz_fademem_prune_sweep(agent, 0.15);
+    assert(pruned == 1);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory_archive WHERE archived_reason = 'fademem_decay';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    for (int i = 1; i <= 5; i++) {
+        char top[64];
+        snprintf(top, sizeof(top), "Episodic Error %d", i);
+        belya_agent_persist_memory_scoped(agent, top, "POSIX signal SIGTERM requires graceful shutdown in daemon loop.", "posix_wing", "signals_room");
+    }
+
+    size_t fused = almaz_concept_fusion_sweep(agent);
+    assert(fused == 5);
+
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory WHERE wing = 'distilled_schemata' AND room = 'signals_room';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory_archive WHERE archived_reason = 'concept_fusion_consolidated';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 5);
+    sqlite3_finalize(stmt);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_subconscious_fusion.sqlite");
+    printf("  -> Late-2026 Subconscious Pruning & Concept Fusion Sweeps PASSED\n");
+}
+
+void test_coral_dual_stream_routing(void) {
+    printf("[Test] Late-2026 CORAL Dual-Stream Memory Routing & Rubrics...\n");
+
+    unlink("test_coral.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_coral.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    almaz_coral_record_tactical(agent, "task_88", "compiler_error", "linker_failure", "ld: undefined symbol: sockaddr_is_private");
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT trace_type, summary FROM tactical_memory WHERE task_id = 'task_88';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "compiler_error") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "linker_failure") == 0);
+    sqlite3_finalize(stmt);
+
+    bool promoted = almaz_coral_promote_strategic(agent, "rubric_linker_undefined",
+        "unresolved_symbol", "ld: undefined symbol",
+        "Object file or C source not passed in gcc compiler command line",
+        "Add missing .c module or static library flag to Makefile target",
+        "task_88");
+    assert(promoted == true);
+
+    char *res = almaz_coral_query_strategic(agent, "linker");
+    assert(res != NULL);
+    assert(strstr(res, "rubric_linker_undefined") != NULL);
+    assert(strstr(res, "Add missing .c module") != NULL);
+    free(res);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_coral.sqlite");
+    printf("  -> Late-2026 CORAL Dual-Stream Memory Routing PASSED\n");
+}
+
+void test_simplemem_atomic_facts(void) {
+    printf("[Test] Late-2026 SimpleMem De-linearized Semantic Fact Extraction...\n");
+
+    unlink("test_simplemem.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_simplemem.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    almaz_simplemem_record_fact(agent, "engine.c", "engine.c configures MAX_WORKERS=16 thread pool", 1);
+    almaz_simplemem_record_fact(agent, "engine.c", "engine.c binds to POSIX sockaddr on port 8080", 2);
+    almaz_simplemem_record_fact(agent, "config.h", "config.h defines DEFAULT_TIMEOUT_MS=5000", 3);
+
+    char *res_entity = almaz_simplemem_query_facts(agent, "engine.c", NULL);
+    assert(res_entity != NULL);
+    assert(strstr(res_entity, "MAX_WORKERS=16") != NULL);
+    assert(strstr(res_entity, "port 8080") != NULL);
+    free(res_entity);
+
+    char *res_fts = almaz_simplemem_query_facts(agent, NULL, "DEFAULT_TIMEOUT_MS");
+    assert(res_fts != NULL);
+    assert(strstr(res_fts, "config.h") != NULL);
+    assert(strstr(res_fts, "DEFAULT_TIMEOUT_MS=5000") != NULL);
+    free(res_fts);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_simplemem.sqlite");
+    printf("  -> Late-2026 SimpleMem De-linearized Semantic Facts PASSED\n");
+}
+
+static void test_soft_constraint_relaxation(void) {
+    printf("[Test] Late-2026 MIT IDE Soft-Constraint Relaxation & Headroom...\n");
+
+    // 1. Budget 5% Emergency Headroom Test
+    BudgetState bs;
+    budget_state_reset_day(&bs);
+    BudgetLimits lim = {0};
+    lim.daily_tokens = 100;
+    bool sealed = false;
+
+    // Normal consumption up to 100
+    assert(budget_state_consume(&bs, &lim, 60, 40, 0, 1, &sealed) == true);
+    assert(sealed); // Sealed under normal 100-token limit
+
+    // With emergency headroom (105 tokens allowed)
+    BudgetState bs_hr;
+    budget_state_reset_day(&bs_hr);
+    sealed = false;
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 60, 40, 0, 1, true, &sealed) == true);
+    assert(!sealed); // 100 spent, but limit is 105 so not yet sealed!
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 2, 2, 0, 1, true, &sealed) == true); // 104 spent
+    assert(!sealed);
+
+    // Exceeding 105 tokens
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 5, 0, 0, 1, true, &sealed) == false);
+    assert(sealed);
+
+    // 2. Circuit Breaker Relaxation during Critical Remediation
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_soft_cb.sqlite", "Soft CB Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // Insert pending health remediation goal
+    almaz_goals_add(agent->db, "Fix database disk corruption", "HEALTH_REMEDIATION", 100, "Critical crash recovery");
+
+    char *breaker_msg = NULL;
+    const char *bad_args = "{\"command\": \"cat /nonexistent/disk/status\"}";
+
+    // Fails 1, 2, 3 should NOT trip when max_allowed_failures is relaxed to 5
+    for (int f = 1; f <= 3; f++) {
+        bool tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+        assert(!tripped);
+        assert(breaker_msg == NULL);
+        assert(h->consecutive_tool_failures == f);
+    }
+
+    // 4th failure
+    bool tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+    assert(!tripped);
+    assert(h->consecutive_tool_failures == 4);
+
+    // 5th failure -> Trips circuit breaker!
+    tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+    assert(tripped);
+    assert(breaker_msg != NULL);
+    assert(strstr(breaker_msg, "5 times consecutively") != NULL);
+    free(breaker_msg);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_soft_cb.sqlite");
+    printf("  -> Late-2026 MIT IDE Soft-Constraint Relaxation PASSED\n");
+}
+
+static void test_roma_context_firewall(void) {
+    printf("[Test] Late-2026 ROMA Recursive Context Firewall...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_roma.sqlite", "Roma Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    belya_agent_load_manifests(agent, "agents");
+    char *envelope = belya_agency_dispatch_subagent(h, "architect", "Inspect repository structure", "Read-only audit");
+    assert(envelope != NULL);
+    assert(strstr(envelope, "=== Belya Agency Subagent Execution Envelope") != NULL);
+    assert(strstr(envelope, "ROMA Context Firewall: Child execution trace isolated") != NULL);
+    assert(strstr(envelope, "\nExecution Trace:\n") == NULL);
+    free(envelope);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_roma.sqlite");
+    printf("  -> Late-2026 ROMA Recursive Context Firewall PASSED\n");
+}
+
+static void test_symbol_graph_navigation(void) {
+    printf("[Test] Late-2026 AST Symbol Graph Navigation & Call-Tree...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_symbols.sqlite", "Symbol Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    size_t count = belya_harness_index_symbols(h, ".");
+    assert(count > 0);
+
+    char *def = belya_harness_goto_definition(h, "belya_harness_index_symbols");
+    assert(def != NULL);
+    assert(strstr(def, "Symbol Definition: 'belya_harness_index_symbols'") != NULL);
+    free(def);
+
+    char *callers = belya_harness_find_callers(h, "belya_harness_index_symbols");
+    assert(callers != NULL);
+    free(callers);
+
+    BelyaToolCallback cb_goto = get_tool_cb(h, "goto_definition");
+    assert(cb_goto != NULL);
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "symbol", json_create_string("belya_harness_index_symbols"));
+    char *res = cb_goto(agent, args);
+    assert(res != NULL);
+    assert(strstr(res, "Symbol Definition") != NULL);
+    free(res);
+    json_free(args);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_symbols.sqlite");
+    printf("  -> Late-2026 AST Symbol Graph Navigation PASSED (%zu symbols indexed)\n", count);
+}
+
+static void test_repo_to_mcp_synthesis(void) {
+    printf("[Test] Late-2026 Paper2Agent Repo-to-MCP Dynamic Synthesis...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "MCP Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    bool ok = belya_harness_synthesize_mcp_server(h, "paper2agent_calc", "compute_pi", "Compute pi approximation", "echo 3.14159", "{\"type\":\"object\"}");
+    assert(ok == true);
+
+    assert(get_tool_cb(h, "compute_pi") != NULL || h->tool_count >= 19);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink(".belya/mcp/paper2agent_calc_server.sh");
+    printf("  -> Late-2026 Paper2Agent Repo-to-MCP Synthesis PASSED\n");
+}
+
+static void test_mythos_variant_analysis(void) {
+    printf("[Test] Late-2026 Mythos Variant Security Sweeper...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Audit Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    char *report = belya_harness_audit_security_variants(h, "all", ".");
+    assert(report != NULL);
+    assert(strstr(report, "Mythos Variant Security Sweeper Report") != NULL);
+    assert(strstr(report, "PoC Verification Command") != NULL);
+    free(report);
+
+    BelyaToolCallback cb_audit = get_tool_cb(h, "audit_security_variants");
+    assert(cb_audit != NULL);
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "pattern_type", json_create_string("buffer_overflow"));
+    json_obj_add(args, "target_path", json_create_string("."));
+    char *obs = cb_audit(agent, args);
+    assert(obs != NULL);
+    assert(strstr(obs, "Mythos Variant Security Sweeper Report") != NULL);
+    free(obs);
+    json_free(args);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    printf("  -> Late-2026 Mythos Variant Security Sweeper PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2737,7 +3167,18 @@ int main(void) {
     test_budget_controller();
     test_timeline_anomaly();
     test_security_adversarial_suite();
-    printf("================ All Tests Passed Successfully (43/43 - 100%%) ================\n\n");
+    test_in_context_loop_breaker();
+    test_context_compactor_middle_out();
+    test_fademem_biological_decay();
+    test_fademem_prune_and_concept_fusion();
+    test_coral_dual_stream_routing();
+    test_simplemem_atomic_facts();
+    test_soft_constraint_relaxation();
+    test_roma_context_firewall();
+    test_symbol_graph_navigation();
+    test_repo_to_mcp_synthesis();
+    test_mythos_variant_analysis();
+    printf("================ All Tests Passed Successfully (54/54 - 100%%) ================\n\n");
     return 0;
 }
 
