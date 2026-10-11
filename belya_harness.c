@@ -348,12 +348,30 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
 /* Secrets and operator state that file tools must never expose or mutate. */
 static bool is_secret_path(const char *path) {
     if (!path || path[0] == '\0') return false;
+    if (strstr(path, "/.ssh/") != NULL || strstr(path, "/.ssh") != NULL ||
+        strncmp(path, ".ssh/", 5) == 0 || strcmp(path, ".ssh") == 0 ||
+        strstr(path, "/.git/") != NULL || strstr(path, "/.git") != NULL ||
+        strncmp(path, ".git/", 5) == 0 || strcmp(path, ".git") == 0 ||
+        strstr(path, "/.aws/") != NULL || strstr(path, "/.aws") != NULL ||
+        strncmp(path, ".aws/", 5) == 0 || strcmp(path, ".aws") == 0 ||
+        strstr(path, "/.config/gcloud/") != NULL || strncmp(path, ".config/gcloud/", 15) == 0) {
+        return true;
+    }
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    if (strcmp(base, ".env") == 0) return true;
-    if (strcmp(base, "budget_state.txt") == 0) return true;
-    if (strcmp(base, ".deploy_state") == 0) return true;
+    if (strcmp(base, ".env") == 0 || strncmp(base, ".env.", 5) == 0) return true;
+    if (strcmp(base, "budget_state.txt") == 0 || strcmp(base, ".deploy_state") == 0) return true;
+    if (strcmp(base, "id_rsa") == 0 || strcmp(base, "id_ed25519") == 0 || strcmp(base, "id_ecdsa") == 0) return true;
+    if (strcmp(base, "credentials.json") == 0 || strcmp(base, "service_account.json") == 0) return true;
+    if (strcmp(base, "belya_memory.sqlite") == 0 || strcmp(base, "almaz_memory.sqlite") == 0 ||
+        strcmp(base, "belya_memory.sqlite-wal") == 0 || strcmp(base, "almaz_memory.sqlite-wal") == 0) {
+        return true;
+    }
     return false;
+}
+
+bool belya_harness_is_secret_path(const char *path) {
+    return is_secret_path(path);
 }
 
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write) {
@@ -1527,6 +1545,10 @@ static bool sockaddr_is_private(const struct sockaddr *sa) {
         return false;
     }
     return false;
+}
+
+bool belya_harness_sockaddr_is_private(const struct sockaddr *sa) {
+    return sockaddr_is_private(sa);
 }
 
 static curl_socket_t fetch_url_opensocket_cb(void *clientp, curlsocktype purpose,

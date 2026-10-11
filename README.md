@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/Release-v0.7.1--harden-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.7.1-harden)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
-[![Tests](https://img.shields.io/badge/Unit_Tests-42%2F42_Passed_(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Unit_Tests-43%2F43_Passed_(100%25)-brightgreen.svg)]()
 [![Holdout](https://img.shields.io/badge/Holdout_Suite-57%2F57_Assertions_(100%25)-brightgreen.svg)]()
 [![Compiler](https://img.shields.io/badge/Compiler-0_Warnings_Clean-brightgreen.svg)]()
 [![Safety](https://img.shields.io/badge/Memory_Safety-0_Leaks_ASan_Clean-success.svg)]()
@@ -41,8 +41,8 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
   - [Mode 3: Headless Batch / CI/CD Mission](#mode-3-headless-batch--cicd-mission)
   - [Mode 4: Multi-Agent Orchestration Mode](#mode-4-multi-agent-orchestration-mode)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (42/42 Passed - 100%)](#1-unit-test-suite-4242-passed---100)
-  - [2. Hidden Holdout Regression Suite (52/52 Assertions - 100%)](#2-hidden-holdout-regression-suite-5252-assertions---100)
+  - [1. Unit Test Suite (43/43 Passed - 100%)](#1-unit-test-suite-4343-passed---100)
+  - [2. Hidden Holdout Regression Suite (57/57 Assertions - 100%)](#2-hidden-holdout-regression-suite-5757-assertions---100)
   - [3. Zero-Tolerance Memory Safety (ASan/UBSan)](#3-zero-tolerance-memory-safety-asanubsan)
 - [Configuration & Deployment (`.env`, `almaz.service`)](#configuration--deployment-env-almazservice)
 - [Ecosystem Relationship: Almaz & Belya](#ecosystem-relationship-almaz--belya)
@@ -322,7 +322,7 @@ and a scorecard is only as trustworthy as the instrument behind it.
 
 ## Automated Verification & Test Suites
 
-### 1. Unit Test Suite (42/42 Passed - 100%)
+### 1. Unit Test Suite (43/43 Passed - 100%)
 ```bash
 make test
 ```
@@ -364,11 +364,17 @@ make test
 [Test] Jev TypeSafe AI Integration & Coprocessor Parser...          PASSED
 [Test] SARSI Persistent Self-Model (Organism Introspection)...      PASSED
 [Test] VIGIL Emotional Appraisal State Machine...                   PASSED
+[Test] Measured Recent Form & Escalation Gates (M2.1/R6a)...        PASSED
 [Test] KnowSelf Situational Memory Gating...                        PASSED
-================ All Tests Passed Successfully (42/42 - 100%) ================
+[Test] Autonomic Subconscious Idle Loop & Intrinsic Goals...        PASSED
+[Test] Health Watcher (Degradation & Failure Detection)...          PASSED
+[Test] Budget Controller (Daily Soft & Hard Token Caps)...          PASSED
+[Test] Timeline Anomaly (FTS5 Anomaly Scan & Deduplication)...      PASSED
+[Test] Security & Adversarial Hardening (SSRF, Jailing, Fuzz, SQLi).PASSED
+================ All Tests Passed Successfully (43/43 - 100%) ================
 ```
 
-### 2. Hidden Holdout Regression Suite (52/52 Assertions - 100%)
+### 2. Hidden Holdout Regression Suite (57/57 Assertions - 100%)
 ```bash
 make holdout
 ```
@@ -383,7 +389,7 @@ make holdout
   [Holdout 7/9] KnowSelf Memory Gating Precision: PASSED
   [Holdout 8/9] Token Estimator Limits: PASSED
   [Holdout 9/9] Metacognitive Circuit Breaker Resilience: PASSED
-================ Holdout Benchmark Passed: 52/52 (100%) ================
+================ Holdout Benchmark Passed: 57/57 (100%) ================
 ```
 
 ### 3. Zero-Tolerance Memory Safety (ASan/UBSan)
@@ -391,7 +397,8 @@ Compiled and tested under AddressSanitizer and UndefinedBehaviorSanitizer:
 ```bash
 make clean && make test CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 ```
-**Result: 0 memory leaks, 0 heap buffer overflows, 0 undefined behavior.**
+**Result: 43/43 tests pass with 0 memory leaks, 0 heap buffer overflows, 0 undefined behavior.**
+
 
 ---
 
@@ -461,7 +468,7 @@ Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and
                     ▼                                ▼
         [Deterministic Software ]        [Autonomous Self-Evolving]
         [Engineering Workhorse  ]        [Self-Healing Organism   ]
-        [34 Tests / ASan Clean  ]        [42 Tests + 57 Holdouts  ]
+        [35 Tests / ASan Clean  ]        [43 Tests + 57 Holdouts  ]
         [Production Deployments ]        [Watchdog + SARSI + VIGIL]
 ```
 
