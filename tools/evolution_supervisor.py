@@ -834,6 +834,141 @@ def update_self_model_from_evolution(evo_result, arena_result):
 # =========================================================================
 # Phase 5: Dispatch Telegram Scorecard
 # =========================================================================
+ARENA_HISTORY = REPORTS_DIR / "arena_history.jsonl"
+ARENA_REGRESSION_PCT = 15.0          # alert when a metric worsens vs the median
+
+
+def _deploy_meta_fields():
+    """Read the provenance file written by deploy_meta.sh (plan M0.4)."""
+    out = {}
+    try:
+        for line in (WORKSPACE_DIR / ".deploy_meta").read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return out
+
+
+def append_arena_history(arena_result):
+    """M4.1: append one record per night so the scorecard can show a real trend.
+
+    Before this, the scorecard printed bare numbers (0.113s vs 13.894s) with no
+    history, which is why a phantom 123x "regression" went unnoticed for weeks.
+    """
+    meta = _deploy_meta_fields()
+    b = arena_result.get("belya", {})
+    a = arena_result.get("almaz", {})
+    rec = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mode": arena_result.get("mode"),
+        "ratio": arena_result.get("ratio"),
+        "belya_duration": b.get("duration"),
+        "almaz_duration": a.get("duration"),
+        "belya_rss": b.get("rss"),
+        "almaz_rss": a.get("rss"),
+        "almaz_loc": a.get("loc"),
+        "deploy_seq": meta.get("DEPLOY_SEQ"),
+        "active_sha": (meta.get("ACTIVE_SHA") or "")[:12],
+        "lkg_sha": (meta.get("LKG_SHA") or "")[:12],
+        "selfest_active": meta.get("SELFEST_ACTIVE"),
+        "selfest_lkg": meta.get("SELFEST_LKG"),
+    }
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ARENA_HISTORY, "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        print(f"[+] Arena history appended ({rec['ratio']}x, deploy_seq {rec['deploy_seq']})")
+    except Exception as e:
+        print(f"[!] Arena history append failed: {e}")
+    return rec
+
+
+def _median(vals):
+    vs = sorted(v for v in vals if isinstance(v, (int, float)))
+    if not vs:
+        return None
+    n = len(vs)
+    return vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2.0
+
+
+def arena_trend(window=7):
+    """M4.1: 7-night median + delta, and regression alerts past ARENA_REGRESSION_PCT.
+
+    Returns (scorecard_lines, alerts).
+    """
+    rows = []
+    try:
+        for line in ARENA_HISTORY.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+    except Exception:
+        rows = []
+    if len(rows) < 2:
+        return [f"• Trend: need >=2 nights of history (have {len(rows)})"], []
+
+    hist = rows[:-1][-window:]      # prior nights only; rows[-1] is tonight
+    tonight = rows[-1]
+    lines, alerts = [], []
+    for key, label in (("almaz_duration", "Almaz duration"), ("belya_duration", "Belya duration")):
+        med = _median([r.get(key) for r in hist])
+        cur = tonight.get(key)
+        if med and cur:
+            delta = (cur - med) / med * 100.0
+            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "=")
+            lines.append(f"• {label}: {cur:.3f}s vs {len(hist)}-night median {med:.3f}s ({arrow}{abs(delta):.1f}%)")
+            if delta > ARENA_REGRESSION_PCT:
+                alerts.append(f"{label} {delta:+.1f}% vs median")
+    rmed = _median([r.get("ratio") for r in hist])
+    if rmed and tonight.get("ratio"):
+        lines.append(f"• Ratio: {tonight['ratio']}x vs {len(hist)}-night median {rmed}x")
+    return lines, alerts
+
+
+def collect_status_block():
+    """M4.3: guardian health, immutability, provenance and spend for the scorecard."""
+    meta = _deploy_meta_fields()
+    lines = [
+        f"• ACTIVE sha `{(meta.get('ACTIVE_SHA') or '?')[:12]}` | LKG sha `{(meta.get('LKG_SHA') or '?')[:12]}` | DEPLOY_SEQ {meta.get('DEPLOY_SEQ', '?')}",
+        f"• Selfest: ACTIVE={meta.get('SELFEST_ACTIVE', '?')} LKG={meta.get('SELFEST_LKG', '?')}",
+    ]
+    try:
+        r = subprocess.run(["systemctl", "show", "almaz-guardian.timer", "-p", "LastTriggerUSec", "--value"],
+                           capture_output=True, text=True, timeout=10)
+        last = r.stdout.strip() or "unknown"
+    except Exception:
+        last = "unknown"
+    try:
+        r = subprocess.run(["lsattr", str(WORKSPACE_DIR / "almaz-watchdog")],
+                           capture_output=True, text=True, timeout=10)
+        flags = r.stdout.split()[0] if r.stdout.split() else ""
+        immutable = "yes" if "i" in flags else "NO"
+    except Exception:
+        immutable = "unknown"
+    lines.append(f"• Guardian last run: {last} | watchdog immutable: {immutable}")
+    try:
+        mh = REPORTS_DIR / "mutation_history.json"
+        last_mut = datetime.fromtimestamp(mh.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if mh.exists() else "none"
+    except Exception:
+        last_mut = "unknown"
+    spend = 0
+    try:
+        sp = REPORTS_DIR / "evolution_spend.jsonl"
+        if sp.exists():
+            for line in sp.read_text().splitlines():
+                if line.strip():
+                    spend += float(json.loads(line).get("tokens", 0) or 0)
+    except Exception:
+        pass
+    lines.append(f"• Last mutation record: {last_mut} | generator spend to date: {int(spend)} tokens")
+    return lines
+
+
 def dispatch_daily_report(findings, evo_result, arena_result, healing_status, env):
     """Formats and sends the authentic executive markdown scorecard to Telegram."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -841,6 +976,12 @@ def dispatch_daily_report(findings, evo_result, arena_result, healing_status, en
 
     commit_line = f"`{commit_sha}`" if commit_sha else "No commit (clean)"
     patch_line = f"`{patch_path}`" if patch_path else "None"
+
+    # M4.1 / M4.3: trend vs history, regression alert, resilience + provenance block
+    trend_lines, trend_alerts = arena_trend()
+    trend_block = "\n".join(trend_lines)
+    status_block = "\n".join(collect_status_block())
+    alert_block = ("\n⚠️ *REGRESSION ALERT:* " + "; ".join(trend_alerts)) if trend_alerts else ""
 
     scorecard = (
         f"⚔️ *ALMAZ SOVEREIGN ORGANISM ARENA SCORECARD*\n"
@@ -864,7 +1005,11 @@ def dispatch_daily_report(findings, evo_result, arena_result, healing_status, en
         f"🏆 *4. Real Champion vs. Challenger Arena*\n"
         f"• Challenge: {arena_result.get('mode', 'verification battery')} | ratio (Almaz/Belya): {arena_result.get('ratio', 'n/a')}x\n"
         f"• *Core Belya (Champion):* {arena_result['belya']['status']} | {arena_result['belya']['duration']}s | RSS: {arena_result['belya']['rss']} | {arena_result['belya']['loc']} LOC\n"
-        f"• *Almaz (Challenger):*   {arena_result['almaz']['status']} | {arena_result['almaz']['duration']}s | RSS: {arena_result['almaz']['rss']} | {arena_result['almaz']['loc']} LOC\n\n"
+        f"• *Almaz (Challenger):*   {arena_result['almaz']['status']} | {arena_result['almaz']['duration']}s | RSS: {arena_result['almaz']['rss']} | {arena_result['almaz']['loc']} LOC\n"
+        f"{trend_block}\n"
+        f"{alert_block}\n\n"
+        f"🛠️ *5. Resilience & Provenance (M0/M4)*\n"
+        f"{status_block}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 *System Status:* Core Belya pristine. Almaz empirical organism evolution complete."
     )
@@ -918,6 +1063,7 @@ def main():
 
     evo_result = run_self_evolution(force_retest=args.force_retest)
     arena_result = run_arena_benchmark()
+    append_arena_history(arena_result)          # M4.1: record before rendering the trend
     healing_status = run_self_healing_analysis()
     update_self_model_from_evolution(evo_result, arena_result)
     dispatch_daily_report(findings, evo_result, arena_result, healing_status, env)

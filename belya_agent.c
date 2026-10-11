@@ -74,6 +74,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     agent->turns_since_save = 0;
     agent->confidence = 0.70f;
     agent->frustration = 0.00f;
+    agent->recent_form = 1.00f;   /* M2.1/R6(a): start in form */
+    agent->recent_form_samples = 0;
     agent->lifetime_turns = 0;
     agent->lifetime_successes = 0;
     agent->lifetime_failures = 0;
@@ -205,6 +207,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
                         double frust_val = json_obj_get_num(jv, "frustration", -1.0);
                         if (conf_val >= 0.0) agent->confidence = (float)conf_val;
                         if (frust_val >= 0.0) agent->frustration = (float)frust_val;
+                        double rf_val = json_obj_get_num(jv, "recent_form", -1.0);
+                        if (rf_val >= 0.0) agent->recent_form = (float)rf_val;
                         json_free(jv);
                     }
                 }
@@ -1716,6 +1720,8 @@ char *belya_agent_search_conversations(BelyaAgent *agent, const char *query) {
 }
 
 ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
+    /* M2.1/R6(a): one decay step per turn so a stale bad streak fades. */
+    almaz_agent_recent_form_decay(agent);
     // Auto-save: save before compaction drops messages, and on turn interval
     if (agent->auto_save_interval > 0 && agent->db) {
         bool should_save = false;
@@ -1946,6 +1952,18 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         if (agent->frustration >= 0.60f) {
             dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
         }
+        /* M2.1/R6(a): escalation driven by the MEASURED metric, so these tiers
+           are actually reachable (the self-reported frustration is pinned). */
+        {
+            float distress = almaz_agent_distress(agent);
+            if (distress >= 0.80f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING (SEVERE): measured recent form %.2f over %zu observations. STOP the multi-step plan, report your current state, and request guidance before continuing.\n", (double)agent->recent_form, agent->recent_form_samples);
+            } else if (distress >= 0.60f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: measured recent form %.2f. Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->recent_form);
+            } else if (distress >= 0.35f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE NOTICE: measured recent form %.2f. Shrink scope and VERIFY with a read/check step before any further speculative edit.\n", (double)agent->recent_form);
+            }
+        }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
         dyn_str_free(&telem_ds);
@@ -2079,6 +2097,8 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
 }
 
 ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char *instruction) {
+    /* M2.1/R6(a): symmetric decay on the forced-text path. */
+    almaz_agent_recent_form_decay(agent);
     if (instruction && strlen(instruction) > 0) {
         belya_agent_add_message(agent, "user", instruction);
     }
@@ -2163,6 +2183,18 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
             total_tools);
         if (agent->frustration >= 0.60f) {
             dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
+        }
+        /* M2.1/R6(a): escalation driven by the MEASURED metric, so these tiers
+           are actually reachable (the self-reported frustration is pinned). */
+        {
+            float distress = almaz_agent_distress(agent);
+            if (distress >= 0.80f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING (SEVERE): measured recent form %.2f over %zu observations. STOP the multi-step plan, report your current state, and request guidance before continuing.\n", (double)agent->recent_form, agent->recent_form_samples);
+            } else if (distress >= 0.60f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: measured recent form %.2f. Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->recent_form);
+            } else if (distress >= 0.35f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE NOTICE: measured recent form %.2f. Shrink scope and VERIFY with a read/check step before any further speculative edit.\n", (double)agent->recent_form);
+            }
         }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
@@ -2277,11 +2309,12 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
     double success_rate = almaz_success_rate(agent);   /* R4: unified (was successes/turns) */
     double rss_mb = belya_get_current_rss_mb();
 
-    char stats_json[512];
+    char stats_json[768];
     snprintf(stats_json, sizeof(stats_json),
-             "{\"turns\": %zu, \"successes\": %zu, \"failures\": %zu, \"success_rate\": %.3f, \"tool_calls\": %zu, \"rss_mb\": %.2f, \"confidence\": %.2f, \"frustration\": %.2f}",
+             "{\"turns\": %zu, \"successes\": %zu, \"failures\": %zu, \"success_rate\": %.3f, \"tool_calls\": %zu, \"rss_mb\": %.2f, \"confidence\": %.2f, \"frustration\": %.2f, \"recent_form\": %.3f, \"recent_form_samples\": %zu}",
              total, agent->lifetime_successes, agent->lifetime_failures, success_rate,
-             agent->lifetime_tool_calls, rss_mb, (double)agent->confidence, (double)agent->frustration);
+             agent->lifetime_tool_calls, rss_mb, (double)agent->confidence, (double)agent->frustration,
+             (double)agent->recent_form, agent->recent_form_samples);
 
     char *curr_cap = NULL;
     char *curr_weak = NULL;
@@ -2328,9 +2361,47 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
     return res;
 }
 
+/* ---- M2.1 / R6(a): measured recent form ------------------------------------
+   EWMA over real, non-self-reported outcomes. 1.0 = fully in form, 0.0 = badly
+   out of form. Kept apart from confidence/frustration so the asserted clamping
+   spec is untouched; `almaz_agent_distress()` is what the gates read. */
+#define ALMAZ_RECENT_FORM_ALPHA   0.25f   /* weight of the newest observation */
+#define ALMAZ_RECENT_FORM_NEUTRAL 0.75f   /* drift target when nothing happens */
+#define ALMAZ_RECENT_FORM_DECAY   0.02f   /* per-turn pull toward neutral */
+
+static float almaz_clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void almaz_agent_recent_form_observe(BelyaAgent *agent, float observation) {
+    if (!agent) return;
+    float o = almaz_clampf(observation, 0.0f, 1.0f);
+    agent->recent_form = almaz_clampf(
+        (1.0f - ALMAZ_RECENT_FORM_ALPHA) * agent->recent_form + ALMAZ_RECENT_FORM_ALPHA * o,
+        0.0f, 1.0f);
+    agent->recent_form_samples++;
+}
+
+/* With no new evidence the metric drifts back toward neutral, so a bad streak
+   from an hour ago cannot pin the agent in a degraded state forever. */
+void almaz_agent_recent_form_decay(BelyaAgent *agent) {
+    if (!agent) return;
+    agent->recent_form = almaz_clampf(
+        agent->recent_form + ALMAZ_RECENT_FORM_DECAY * (ALMAZ_RECENT_FORM_NEUTRAL - agent->recent_form),
+        0.0f, 1.0f);
+}
+
+/* 0.0 = in form, 1.0 = badly out of form. */
+float almaz_agent_distress(const BelyaAgent *agent) {
+    if (!agent) return 0.0f;
+    return almaz_clampf(1.0f - agent->recent_form, 0.0f, 1.0f);
+}
+
 void almaz_agent_record_appraisal(BelyaAgent *agent, bool success) {
     if (!agent) return;
     agent->lifetime_tool_calls++;
+    /* M2.1/R6(a): fold the real outcome into the measured metric. */
+    almaz_agent_recent_form_observe(agent, success ? 1.0f : 0.0f);
     if (success) {
         agent->lifetime_successes++;
         agent->confidence = (agent->confidence + 0.05f > 1.0f) ? 1.0f : (agent->confidence + 0.05f);

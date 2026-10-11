@@ -2052,6 +2052,45 @@ static void test_emotional_appraisal(void) {
     printf("  -> VIGIL Emotional Appraisal State Machine PASSED\n");
 }
 
+static void test_recent_form_metric(void) {
+    printf("[Test] Measured Recent Form & Escalation Gates (M2.1/R6a)...\n");
+    BelyaAgent agent;
+    memset(&agent, 0, sizeof(agent));
+    agent.recent_form = 1.0f;
+    agent.confidence = 0.70f;
+    agent.frustration = 0.00f;
+
+    /* A clean start is "in form": no distress, no escalation. */
+    assert(almaz_agent_distress(&agent) == 0.0f);
+
+    /* Consecutive failures must move the MEASURED metric. */
+    for (int i = 0; i < 8; i++) almaz_agent_record_appraisal(&agent, false);
+    assert(agent.recent_form < 0.35f);
+    assert(almaz_agent_distress(&agent) > 0.60f);   /* warning tier reachable */
+    assert(agent.recent_form_samples == 8);
+
+    /* The clamped spec fields still saturate exactly as asserted elsewhere. */
+    assert(agent.confidence == 0.0f);
+    assert(agent.frustration == 1.0f);
+
+    /* Recovery brings measured form back above the notice tier. */
+    for (int i = 0; i < 8; i++) almaz_agent_record_appraisal(&agent, true);
+    assert(almaz_agent_distress(&agent) < 0.35f);
+
+    /* Decay is bounded and monotone toward neutral, never overshooting. */
+    agent.recent_form = 0.0f;
+    for (int i = 0; i < 500; i++) almaz_agent_recent_form_decay(&agent);
+    assert(agent.recent_form > 0.70f && agent.recent_form <= 0.75f + 0.0001f);
+
+    /* Out-of-range observations are clamped, never propagated. */
+    almaz_agent_recent_form_observe(&agent, 99.0f);
+    assert(agent.recent_form <= 1.0f);
+    almaz_agent_recent_form_observe(&agent, -99.0f);
+    assert(agent.recent_form >= 0.0f);
+
+    printf("  -> Measured Recent Form & Escalation Gates PASSED\n");
+}
+
 static void test_knowself_memory_gating(void) {
     printf("[Test] KnowSelf Situational Memory Gating...\n");
     assert(almaz_should_retrieve_memory("Do you remember our discussion yesterday?"));
@@ -2469,11 +2508,12 @@ int main(void) {
     test_jev_client();
     test_self_model_lifecycle();
     test_emotional_appraisal();
+    test_recent_form_metric();
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
-    printf("================ All Tests Passed Successfully (41/41 - 100%%) ================\n\n");
+    printf("================ All Tests Passed Successfully (42/42 - 100%%) ================\n\n");
     return 0;
 }

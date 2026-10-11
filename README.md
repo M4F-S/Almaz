@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/Release-v0.1.0--organism-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.1.0-organism)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
-[![Tests](https://img.shields.io/badge/Unit_Tests-37%2F37_Passed_(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Unit_Tests-42%2F42_Passed_(100%25)-brightgreen.svg)]()
 [![Holdout](https://img.shields.io/badge/Holdout_Suite-52%2F52_Assertions_(100%25)-brightgreen.svg)]()
 [![Tools](https://img.shields.io/badge/Native_Tools-18_Tools-informational.svg)]()
 [![Watchdog](https://img.shields.io/badge/Watchdog-VIGIL_Self--Healing-success.svg)]()
@@ -37,7 +37,7 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
   - [Mode 3: Headless Batch / CI/CD Mission](#mode-3-headless-batch--cicd-mission)
   - [Mode 4: Multi-Agent Orchestration Mode](#mode-4-multi-agent-orchestration-mode)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (41/41 Passed - 100%)](#1-unit-test-suite-4141-passed---100)
+  - [1. Unit Test Suite (42/42 Passed - 100%)](#1-unit-test-suite-4242-passed---100)
   - [2. Hidden Holdout Regression Suite (52/52 Assertions - 100%)](#2-hidden-holdout-regression-suite-5252-assertions---100)
   - [3. Zero-Tolerance Memory Safety (ASan/UBSan)](#3-zero-tolerance-memory-safety-asanubsan)
 - [Configuration & Deployment (`.env`, `almaz.service`)](#configuration--deployment-env-almazservice)
@@ -271,9 +271,38 @@ Execute compound engineering missions via the Chief-of-Staff multi-agent pipelin
 
 ---
 
+## What is real / what is marketing
+
+Honest inventory, kept in the repo on purpose. **Self-restarting is not self-repairing**,
+and a scorecard is only as trustworthy as the instrument behind it.
+
+**Real, machine-verified mechanisms**
+- `almaz-watchdog` supervises the daemon: fork/exec, exponential backoff, crash-autopsy log,
+  rate-limited crash alert, and a crash-loop circuit breaker that falls back to the LKG slot.
+- A/B deploy slots (`ACTIVE` / `LKG` / `STAGING`) with `promote.sh` gates: candidate
+  `--selfest`, a `--telegram` contract check, a 90 s witness, and automatic rollback.
+- `health_watcher.c`: disk/RSS/SQLite-integrity/gateway/telegram pressure detection, each
+  alert enqueueing a real bounded remediation goal.
+- Taboo-gated mutation loop: sandbox apply → ASan compile → unit battery → hidden holdout →
+  microbenchmark → accept only on a positive speedup, else record and block the phenotype.
+- External 5-minute guardian (binary existence, runtime sha, restart-storm delta, crash-loop
+  journal marker, SQLite `quick_check`, disk) — **report-only, never restarts anything**.
+- `OnFailure` alerting for the `almaz`/`belya` units.
+
+**Limits — stated plainly**
+- **No awareness.** Introspection and telemetry are not consciousness; the self-model is a row
+  in SQLite, not experience.
+- **Self-healing cannot recover a missing supervisor binary.** If `almaz-watchdog` itself is
+  deleted the service dies silently — which is exactly why the external guardian exists.
+- **Evolution is bounded, machine-verified optimisation, not open-ended invention.** The
+  candidate pool is currently a small static list; an LLM generator is planned, not present.
+- **Affect is measured, not felt.** `recent_form` is an EWMA over real outcomes;
+  `confidence`/`frustration` are clamped counters asserted by the test suites.
+- **Single host, no failover.** One VPS, one SQLite file per agent.
+
 ## Automated Verification & Test Suites
 
-### 1. Unit Test Suite (37/37 Passed - 100%)
+### 1. Unit Test Suite (42/42 Passed - 100%)
 ```bash
 make test
 ```
@@ -316,7 +345,7 @@ make test
 [Test] SARSI Persistent Self-Model (Organism Introspection)...      PASSED
 [Test] VIGIL Emotional Appraisal State Machine...                   PASSED
 [Test] KnowSelf Situational Memory Gating...                        PASSED
-================ All Tests Passed Successfully (37/37 - 100%) ================
+================ All Tests Passed Successfully (42/42 - 100%) ================
 ```
 
 ### 2. Hidden Holdout Regression Suite (52/52 Assertions - 100%)

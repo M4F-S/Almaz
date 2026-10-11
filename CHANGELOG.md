@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### 📊 Measured affect, honest metrics & documentation truth (2026-10-11)
+- **M2.1 / R6(a) — measured `recent_form`:** an EWMA over real outcomes (1.0 = in form)
+  added alongside the *unchanged* clamped `confidence`/`frustration` pair, whose
+  saturating-clamp semantics are asserted by both `test_suite.c` and the hidden holdout.
+  Escalation gates now read the measured metric: ≥0.35 notice (verify before speculative
+  edits), ≥0.60 warning, ≥0.80 severe (stop, report state, request guidance). Previously the
+  warning tier was unreachable because self-reported frustration is pinned at 0.00.
+  Persisted in `self_model.performance_stats`; unit suite 41/41 → **42/42**; holdout strengthened.
+- **M1.0 — arena benchmark correctness:** the nightly arena compared a `--help` invocation on
+  one side against a full unit battery on the other (and timed a stale leftover binary). It now
+  resolves each side's own canonical battery with a freshness check, writes output to a temp
+  file instead of an undrained pipe, enforces a hard timeout, and reports the real mode + ratio.
+- **Documentation truth pass:** test-count drift 37/37 → 42/42; new "What is real / what is
+  marketing" section; the scorecard no longer claims a hardcoded 37-module battery.
 ### 🔒 Security, Analytics & Autonomy (leftovers round 2026-10-02)
 - **M1/M3/M8 (shared):** Telegram callback sender-verify, HTML escaping, and UTF-8 chunking; tool-scavenger schema clamp at call site.
 - **M3 recovery-dump directory:** SQLite recovery VACUUM now writes to `/opt/almaz/recovery/` (0700) instead of world-readable `/tmp`.

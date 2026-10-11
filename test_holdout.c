@@ -128,6 +128,23 @@ static void test_emotional_appraisal_clamping(void) {
     HOLDOUT_ASSERT(agent.frustration >= 0.0f, "Frustration does not underflow below 0.0");
     HOLDOUT_ASSERT(agent.confidence == 1.0f, "Confidence clamped at 1.0 on repeated success");
     HOLDOUT_ASSERT(agent.frustration == 0.0f, "Frustration clamped at 0.0 on repeated success");
+
+    /* M2.1/R6(a) strengthening: the MEASURED metric must move, stay bounded and
+       drive the escalation tiers -- independently of the clamped pair above. */
+    BelyaAgent rf_agent;
+    memset(&rf_agent, 0, sizeof(rf_agent));
+    rf_agent.recent_form = 1.0f;
+    HOLDOUT_ASSERT(almaz_agent_distress(&rf_agent) == 0.0f, "Distress is 0.0 when fully in form");
+    for (int i = 0; i < 12; i++) {
+        almaz_agent_record_appraisal(&rf_agent, false);
+    }
+    HOLDOUT_ASSERT(rf_agent.recent_form >= 0.0f && rf_agent.recent_form <= 1.0f, "Recent form stays within [0,1]");
+    HOLDOUT_ASSERT(almaz_agent_distress(&rf_agent) >= 0.60f, "Sustained failure raises measured distress into the warning tier");
+    for (int i = 0; i < 12; i++) {
+        almaz_agent_record_appraisal(&rf_agent, true);
+    }
+    HOLDOUT_ASSERT(almaz_agent_distress(&rf_agent) < 0.35f, "Sustained success returns measured distress below the notice tier");
+    HOLDOUT_ASSERT(rf_agent.recent_form_samples == 24, "Every appraisal folds exactly one observation into recent form");
 }
 
 static void test_memory_gating_precision(void) {
