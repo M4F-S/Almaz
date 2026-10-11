@@ -1,16 +1,17 @@
 # Almaz — Sovereign Self-Evolving, Self-Healing Autonomous AI Organism (Pure C99)
 
-[![Release](https://img.shields.io/badge/Release-v0.1.0--organism-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.1.0-organism)
+[![Release](https://img.shields.io/badge/Release-v0.7.1--harden-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.7.1-harden)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
 [![Tests](https://img.shields.io/badge/Unit_Tests-42%2F42_Passed_(100%25)-brightgreen.svg)]()
-[![Holdout](https://img.shields.io/badge/Holdout_Suite-52%2F52_Assertions_(100%25)-brightgreen.svg)]()
+[![Holdout](https://img.shields.io/badge/Holdout_Suite-57%2F57_Assertions_(100%25)-brightgreen.svg)]()
+[![Compiler](https://img.shields.io/badge/Compiler-0_Warnings_Clean-brightgreen.svg)]()
+[![Safety](https://img.shields.io/badge/Memory_Safety-0_Leaks_ASan_Clean-success.svg)]()
 [![Tools](https://img.shields.io/badge/Native_Tools-18_Tools-informational.svg)]()
 [![Watchdog](https://img.shields.io/badge/Watchdog-VIGIL_Self--Healing-success.svg)]()
-[![Memory](https://img.shields.io/badge/Memory_Footprint-<3.5MB_Idle-purple.svg)]()
-[![Safety](https://img.shields.io/badge/Memory_Safety-0_Leaks_ASan_Clean-success.svg)]()
+[![Memory](https://img.shields.io/badge/Memory_Footprint-<15MB_Active-purple.svg)]()
 
-Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Unlike conventional command-line agents that terminate or halt on errors, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), a persistent self-model (SARSI), an emotional appraisal state machine (VIGIL protocol), situational memory gating (KnowSelf), a 52-assertion hidden holdout regression harness (AIDE² safety framework), and Darwinian AST self-evolution.
+Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Almaz is the **metamorphic twin sibling** of **Belya** (the deterministic software engineering workhorse). While Belya champions rock-solid deterministic code generation and benchmark precision, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), a persistent self-model (SARSI), an emotional appraisal state machine (VIGIL protocol), situational memory gating (KnowSelf), a 57-assertion hidden holdout regression harness (AIDE² safety framework), dual-tier model gateway failover, and Darwinian AST self-evolution.
 
 ---
 
@@ -22,13 +23,16 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
   - [2. SARSI Persistent Self-Model & Introspective Calibration](#2-sarsi-persistent-self-model--introspective-calibration)
   - [3. VIGIL Emotional Appraisal System (Confidence & Frustration Dynamics)](#3-vigil-emotional-appraisal-system-confidence--frustration-dynamics)
   - [4. KnowSelf Situational Memory Gating](#4-knowself-situational-memory-gating)
-  - [5. AIDE² Hidden Holdout Safety Suite (52/52 Assertions)](#5-aide²-hidden-holdout-safety-suite-5252-assertions)
-  - [6. Nightly Evolution Supervisor v3.0 (Timeline Self-Healing)](#6-nightly-evolution-supervisor-v30-timeline-self-healing)
-  - [7. Belya Agency: Multi-Agent Orchestration Engine](#7-belya-agency-multi-agent-orchestration-engine)
-  - [8. Model Gateways: OpenCode Go & OpenRouter](#8-model-gateways-opencode-go--openrouter)
-  - [9. Jev TypeSafe AI Structured Coprocessor](#9-jev-typesafe-ai-structured-coprocessor)
-  - [10. 3-Zone Prefix Caching & Persistent Sockets](#10-3-zone-prefix-caching--persistent-sockets)
-  - [11. Workspace Path Jailing & Sandboxing](#11-workspace-path-jailing--sandboxing)
+  - [5. AIDE² Hidden Holdout Safety Suite (57/57 Assertions)](#5-aide²-hidden-holdout-safety-suite-5757-assertions)
+  - [6. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0](#6-dynamic-llm-mutation-generator--evolution-supervisor-v30)
+  - [7. Dual-Tier Automatic Model Gateway Failover](#7-dual-tier-automatic-model-gateway-failover)
+  - [8. Production Hardening: H4 Tool Stripping & H5 WAL Batching](#8-production-hardening-h4-tool-stripping--h5-wal-batching)
+  - [9. SSRF Defense & Secret Path Jailing](#9-ssrf-defense--secret-path-jailing)
+  - [10. Production Canary Promotion Architecture (promote.sh)](#10-production-canary-promotion-architecture-promotesh)
+  - [11. Belya Agency: Multi-Agent Orchestration Engine](#11-belya-agency-multi-agent-orchestration-engine)
+  - [12. Jev TypeSafe AI Structured Coprocessor](#12-jev-typesafe-ai-structured-coprocessor)
+  - [13. 3-Zone Prefix Caching & Persistent Sockets](#13-3-zone-prefix-caching--persistent-sockets)
+  - [14. Workspace Path Jailing & Sandboxing](#14-workspace-path-jailing--sandboxing)
 - [Native Tool Suite (18 Built-In Tools)](#native-tool-suite-18-built-in-tools)
 - [Command & Slash Controls Reference](#command--slash-controls-reference)
 - [Operating Modes](#operating-modes)
@@ -123,9 +127,9 @@ Unchecked RAG (Retrieval-Augmented Generation) inflates context windows with irr
 - For simple greetings, short instructions, or self-contained tasks, memory retrieval is gated OFF, saving ~800–1,500 tokens of noise per turn.
 - Automatically gates retrieval ON for research tasks, cross-session recalls, architecture audits, or explicit historical queries.
 
-### 5. AIDE² Hidden Holdout Safety Suite (52/52 Assertions)
+### 5. AIDE² Hidden Holdout Safety Suite (57/57 Assertions)
 To allow Darwinian self-evolution without risking catastrophic degradation or code rot, Almaz enforces the **AIDE² Hidden Holdout Protocol** (`make holdout`):
-- **52 Strict Invariable Assertions** testing 9 core sub-architectures:
+- **57 Strict Invariable Assertions** testing 9 core sub-architectures:
   1. `DynString` capacity bounds, reallocation, and formatting safety.
   2. `MiniJSON` deep nesting, Unicode escaping, and tokenization.
   3. `YAML Frontmatter` CRLF/LF delimiter and boundary resilience.
@@ -137,14 +141,36 @@ To allow Darwinian self-evolution without risking catastrophic degradation or co
   9. `Metacognitive Circuit Breaker` doom-loop trip and recovery behavior.
 - Any autonomous mutation that fails even a single assertion is discarded immediately.
 
-### 6. Nightly Evolution Supervisor v3.0 (Timeline Self-Healing)
-Every night at 03:00 UTC, the `almaz-daily.timer` invokes `evolution_supervisor.py`:
-- Scans `belya_memory.sqlite` event timeline for tool errors, compilation failures, and frustration spikes encountered during production operations.
-- Synthesizes targeted hot-path optimizations (e.g. string routines, JSON parser throughput).
-- Runs candidate mutations in isolated sandbox jails under AddressSanitizer and validates both the 41-unit-test suite and the 52-assertion holdout suite.
-- Candidate mutations with zero leaks, 100% test pass, and provable latency reductions are merged and tagged autonomously.
+### 6. Dynamic LLM Mutation Generator & Evolution Supervisor v3.0
+Every night at 03:00 UTC (or via `python3 tools/evolution_supervisor.py`), Almaz executes its autonomous evolution pipeline:
+- **Autonomous M1 Dynamic Mutation Generator:** When the static mutation pool is exhausted or gated out by novelty tracking, the supervisor queries an LLM to analyze the source code and propose targeted single-hunk modifications against safe files (`minijson.c`, `minifrontmatter.c`, `linenoise.c`).
+- **Symmetric Like-for-Like Benchmarking:** Fixes benchmark distortions by ensuring both candidate and baseline execute identical test batteries (`_ensure_battery()`) with hard 90s timeouts and dead-lock free IPC sinks.
+- **Strict Verification Chain:** Candidates are verified with $N=1$ exact match checks, compiled under `-Wall -Wextra -fsanitize=address,undefined`, tested against all 42 unit tests, gated by all 57 hidden holdouts, and benchmarked for speedup.
+- **Novelty Tracking:** Rejects previously evaluated or rejected mutations, ensuring forward evolutionary exploration.
 
-### 7. Belya Agency: Multi-Agent Orchestration Engine
+### 7. Dual-Tier Automatic Model Gateway Failover
+Almaz eliminates runtime downtime through a resilient dual-tier provider gateway:
+- **Primary Endpoint:** Ultra-fast primary provider (e.g. OpenCode Go / DeepSeek V4.1 Flash).
+- **Secondary Fallback:** Automatic failover provider (e.g. OpenRouter / Anthropic / Qwen).
+- **One-Shot Hard Failure Recovery:** Evaluates `gateway_response_is_hard_failure(&res)`. Upon encountering HTTP 429 rate limits, 401 authentication expiry, 502 bad gateways, connection drops, or empty outputs, the gateway seamlessly re-executes the request against the fallback provider without losing conversation history or context.
+
+### 8. Production Hardening: H4 Tool Stripping & H5 WAL Batching
+- **H4 (Orphaned Tool Message Stripper):** In `belya_agent_compact_history()`, Almaz discards dangling `role: tool` messages upon context truncation, ensuring history never begins with an unanchored tool response that would trigger HTTP 400 fatal rejections from frontier APIs.
+- **H5 (SQLite WAL Batch Transactions):** In `belya_agent_save_session()`, history pruning and message insertions are wrapped in explicit `BEGIN IMMEDIATE; ... COMMIT;` transactions. This eliminates per-row fsync overhead, resolves WAL bloat (previously growing to 1.3 GB), and prevents database write lock contention.
+
+### 9. SSRF Defense & Secret Path Jailing
+- **Socket-Level SSRF Filter:** Integrates `sockaddr_is_private()` with libcurl's `CURLOPT_OPENSOCKETFUNCTION` to inspect socket destinations at connection time. Outbound calls to `127.0.0.1`, RFC1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), and cloud metadata IP (`169.254.169.254`) are immediately aborted. Protocols are locked strictly to HTTP/HTTPS via `CURLOPT_PROTOCOLS_STR`.
+- **Secret Path Protection:** Enforces `is_secret_path()` guard across all file tools, barring model access to `.env`, `.ssh/`, `.git/config`, or cloud authorization tokens.
+
+### 10. Production Canary Promotion Architecture (`promote.sh`)
+Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools/promote.sh`:
+- **Triple-Slot Rotation:** Maintains `ACTIVE` (`almaz`), `LKG` (`almaz.bak`), and `STAGING` (`almaz.B`) binary slots.
+- **Gate 1 (Self-Test):** Candidate binary must execute `--selfest` and pass all DB integrity checks.
+- **Gate 2 (Protocol Sanity):** Verifies that candidate announces the supervisor contract (`--telegram`).
+- **Atomic Promotion:** Atomically copies candidate to `STAGING`, creates `.rollback` snapshot, and renames `STAGING -> ACTIVE`.
+- **90-Second Functional Witness Window:** Witnesses the live service for 90 seconds, actively verifying "Almaz Sovereign Telegram Bot Daemon Online" in systemd journal and confirming absence of crash-loops before rotating the Last-Known-Good (`LKG`) slot. If anything fails, it auto-reverts to LKG immediately.
+
+### 11. Belya Agency: Multi-Agent Orchestration Engine
 Almaz embeds the sovereign multi-agent agency engine (`--agency` / `/agency`):
 - **Declarative Agent Manifest Protocol (`agents/*.md`)**: Specializes agents by role (`triage`, `architect`, `builder`, `reviewer`, `tester`).
 - **Least-Privilege Tool Bounding**:
@@ -154,26 +180,20 @@ Almaz embeds the sovereign multi-agent agency engine (`--agency` / `/agency`):
   - `Tester`: Restricted test runner (`make`, `test`, `echo`).
 - **Git Rollback Guard**: Snapshots `HEAD` SHA before mutative execution; automatically executes `git reset --hard` and `git clean -fd` if subagents fail or loop.
 
-### 8. Model Gateways: OpenCode Go & OpenRouter
-Almaz natively supports high-throughput model gateways with persistent TLS keep-alive:
-- **OpenCode Go Backend**: Flat-rate subscription inference via `https://opencode.ai/zen/go/v1` with automatic `x-opencode-session` injection.
-- **OpenRouter Multi-Model Gateway**: Sub-200ms routing to frontier models (`deepseek/deepseek-v4.1-flash`, `qwen/qwen-2.5-coder-32b`, `anthropic/claude-3.7-sonnet`).
-- **Local Fallback**: Full compatibility with local inference engines (Ollama, vLLM, llama.cpp).
-
-### 9. Jev TypeSafe AI Structured Coprocessor
+### 12. Jev TypeSafe AI Structured Coprocessor
 Native integration with Jev TypeSafe AI (`https://jevtypesafeai.com`):
 - Sub-200ms request triage (`/decide`) routing prompts to specialized roles.
 - Real-time tool risk scoring (`/agent/risk`), blocking commands with risk $>0.85$.
 - Context distillation (`/context/filter`) pruning noise during session compaction.
 
-### 10. 3-Zone Prefix Caching & Persistent Sockets
+### 13. 3-Zone Prefix Caching & Persistent Sockets
 - **Zone 1 (Byte-Locked Prefix)**: System prompt and static capabilities manifest locked for 95%+ prompt cache read hits.
 - **Zone 2 (Append-Only Trajectory)**: Conversation and tool observations appended sequentially.
 - **Zone 3 (Ephemeral Context)**: Proprioceptive self-telemetry, SARSI calibration, and VIGIL affective state injected without invalidating Zone 1/2 caches.
 - **Persistent HTTP Sockets**: Handles in `ModelGateway` maintain active TLS 1.3 keep-alive sockets, eliminating 150–250ms of handshake latency per turn.
 
-### 11. Workspace Path Jailing & Sandboxing
-All file access tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`) enforce strict canonical boundary containment via `realpath(3)`, preventing path traversal attacks (`../../etc/passwd`).
+### 14. Workspace Path Jailing & Sandboxing
+All file access tools (`read_file`, `write_file`, `edit_file`, `apply_patch`, `list_dir`) enforce strict canonical boundary containment via `realpath(3)`, preventing path traversal attacks (`../../etc/passwd`). Clamps model-controlled `offset` and `limit` to prevent buffer overflows.
 
 ---
 
@@ -420,33 +440,38 @@ WantedBy=multi-user.target
 
 ---
 
-## Ecosystem Relationship: Almaz & Belya
+## Ecosystem Relationship: Almaz & Belya (Twin Sovereign Siblings)
 
-Almaz and Belya operate as complementary evolutionary tracks:
+Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and low-level POSIX execution foundation, but deployed with complementary, production-grade operational doctrines:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        AI Engineering Ecosystem                        │
+│                  Twin Sovereign C99 Sibling Ecosystem                  │
 └───────────────────┬────────────────────────────────┬───────────────────┘
                     │                                │
                     ▼                                ▼
        ┌──────────────────────────┐     ┌──────────────────────────┐
        │   GitHub: M4F-S/Belya    │     │   GitHub: M4F-S/Almaz    │
-       │     (Production Core)    │     │  (Autonomous Organism)   │
-       │       Tag: v7.0.0        │     │    Tag: v0.1.0-organism  │
-       │     Path: /opt/belya     │     │     Path: /opt/almaz     │
+       │   (Deterministic Core)   │     │  (Metamorphic Organism)  │
+       │       Tag: v7.1.0        │     │    Tag: v0.7.1-harden    │
+       │     Path: /opt/charness  │     │     Path: /opt/almaz     │
        │    Service: belya.service│     │    Service: almaz.service│
        └────────────┬─────────────┘     └────────────┬─────────────┘
                     │                                │
                     ▼                                ▼
         [Deterministic Software ]        [Autonomous Self-Evolving]
         [Engineering Workhorse  ]        [Self-Healing Organism   ]
-        [34 Tests / ASan Clean  ]        [37 Tests + 52 Holdouts  ]
+        [34 Tests / ASan Clean  ]        [42 Tests + 57 Holdouts  ]
         [Production Deployments ]        [Watchdog + SARSI + VIGIL]
 ```
 
-- **Belya (`M4F-S/Belya`)**: The rock-solid, deterministic C99 software engineering workhorse. Focused on production predictability, deterministic code generation, and direct competition with Claude Code and Hermes.
-- **Almaz (`M4F-S/Almaz`)**: The sovereign, self-evolving, self-healing organism exploring autopoietic computing, biological supervisory loops, affective appraisal, and Darwinian code mutation.
+### 🧬 Sibling Lineage & Mutual Hardening
+- **Belya (The Deterministic Sibling & Software Engineering Core)**:
+  Maintained in [`M4F-S/Belya`](https://github.com/M4F-S/Belya), deployed 24/7 on the VPS at `/opt/charness` (symlinked `/opt/belya`) as `belya.service`. Belya is the production engineering core designed for absolute predictability, deterministic test generation, and sub-millisecond execution. It serves as Almaz's rock-solid foundation, providing pristine reference architectures and security harness primitives.
+- **Almaz (The Metamorphic Sibling & Cognitive Organism)**:
+  Maintained in [`M4F-S/Almaz`](https://github.com/M4F-S/Almaz), deployed 24/7 on the VPS at `/opt/almaz` as `almaz.service` supervised by `almaz-watchdog`. Almaz takes Belya's deterministic foundation and elevates it into an autopoietic organism: a biological computing loop featuring a persistent self-model (SARSI), emotional appraisal dynamics (VIGIL), situational memory gating (KnowSelf), and Darwinian AST code mutation guarded by 57 hidden holdout assertions.
+- **Continuous Cross-Sibling Co-Evolution**:
+  Both siblings continuously exchange hardening advances. Security enhancements first proven in Belya (such as H4 orphaned tool message stripping, H5 SQLite WAL batching, and socket-level SSRF filters) are ported into Almaz. Conversely, telemetry innovations created in Almaz (such as H2 SSE usage accounting, linear streaming `memcpy` assembly, and Darwin compatibility) are backported to Belya. In the nightly arena benchmark, both siblings test mutations symmetrically without bias.
 
 ---
 
