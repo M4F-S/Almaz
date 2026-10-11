@@ -54,3 +54,4 @@ almaz.lkg
 # Deploy backups (leftover round)
 almaz.old-*
 almaz_test_asan
+.deploy_meta

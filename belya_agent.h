@@ -45,6 +45,8 @@ typedef struct BelyaAgent {
     size_t lifetime_successes;  /* Successful tool outcomes across lifetime */
     size_t lifetime_failures;   /* Failed tool outcomes across lifetime */
     size_t lifetime_tool_calls; /* Total tool calls executed across lifetime */
+    float recent_form;          /* M2.1/R6(a): measured EWMA of real outcomes, 1.0 = in form */
+    size_t recent_form_samples; /* Observations folded into recent_form */
     char db_path[256];
 } BelyaAgent;
 
@@ -55,6 +57,15 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent);
 
 // Emotional Appraisal (VIGIL EmoBank State Machine)
 void almaz_agent_record_appraisal(BelyaAgent *agent, bool success);
+
+/* M2.1 / R6(a): measured "recent form" — a windowed, evidence-based view of how
+   the agent is ACTUALLY doing, deliberately SEPARATE from confidence/frustration
+   whose saturating-clamp semantics are asserted by both test_suite.c and the
+   hidden holdout (see the reverted R6/EWMA attempt). These are the values the
+   escalation gates use; the clamped pair stays exactly as specified. */
+void almaz_agent_recent_form_observe(BelyaAgent *agent, float observation);
+void almaz_agent_recent_form_decay(BelyaAgent *agent);
+float almaz_agent_distress(const BelyaAgent *agent);
 
 BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *system_instructions);
 void belya_agent_register_schema(BelyaAgent *agent, const char *name, const char *desc, JsonValue *params);

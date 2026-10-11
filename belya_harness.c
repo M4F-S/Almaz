@@ -1,3 +1,4 @@
+#include "common.h"
 #include "belya_harness.h"
 #include <time.h>
 #include <unistd.h>
@@ -13,6 +14,9 @@
 #include <fnmatch.h>
 #include <strings.h>
 #include <regex.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <curl/curl.h>
 
 static BelyaHarness *g_harness = NULL;
@@ -81,7 +85,7 @@ bool belya_harness_is_tool_whitelisted(const char *whitelist, const char *tool_n
         return true;
     }
 
-    char *wl_copy = strdup(whitelist);
+    char *wl_copy = xstrdup(whitelist);
     if (!wl_copy) return false;
 
     bool matched = false;
@@ -114,7 +118,7 @@ bool belya_harness_is_tool_whitelisted(const char *whitelist, const char *tool_n
 static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *cmd = json_obj_get_str(args, "command");
-    if (!cmd) return strdup("Error: Missing command argument.");
+    if (!cmd) return xstrdup("Error: Missing command argument.");
 
     // Tester Restricted Execution Guard: allow only build/test/read/verify targets.
     // M8 fix (same as Belya H3): reject shell metacharacters, then exact argv[0].
@@ -233,7 +237,7 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
                 dyn_str_appendf(&res, "Changed working directory to: %s", g_harness->cwd);
                 return res.data;
             }
-            return strdup("Directory changed successfully.");
+            return xstrdup("Directory changed successfully.");
         }
 
         // Advance past separator and whitespace for the remaining command
@@ -260,7 +264,7 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     int pipefd[2];
     if (pipe(pipefd) == -1) {
         dyn_str_free(&full_cmd_ds);
-        return strdup("Error: Pipe creation failed.");
+        return xstrdup("Error: Pipe creation failed.");
     }
 
     pid_t pid = fork();
@@ -268,7 +272,7 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
         close(pipefd[0]);
         close(pipefd[1]);
         dyn_str_free(&full_cmd_ds);
-        return strdup("Error: Subprocess fork failed.");
+        return xstrdup("Error: Subprocess fork failed.");
     }
 
     if (pid == 0) {
@@ -341,11 +345,43 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     return out.data;
 }
 
+/* Secrets and operator state that file tools must never expose or mutate. */
+static bool is_secret_path(const char *path) {
+    if (!path || path[0] == '\0') return false;
+    if (strstr(path, "/.ssh/") != NULL || strstr(path, "/.ssh") != NULL ||
+        strncmp(path, ".ssh/", 5) == 0 || strcmp(path, ".ssh") == 0 ||
+        strstr(path, "/.git/") != NULL || strstr(path, "/.git") != NULL ||
+        strncmp(path, ".git/", 5) == 0 || strcmp(path, ".git") == 0 ||
+        strstr(path, "/.aws/") != NULL || strstr(path, "/.aws") != NULL ||
+        strncmp(path, ".aws/", 5) == 0 || strcmp(path, ".aws") == 0 ||
+        strstr(path, "/.config/gcloud/") != NULL || strncmp(path, ".config/gcloud/", 15) == 0) {
+        return true;
+    }
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (strcmp(base, ".env") == 0 || strncmp(base, ".env.", 5) == 0) return true;
+    if (strcmp(base, "budget_state.txt") == 0 || strcmp(base, ".deploy_state") == 0) return true;
+    if (strcmp(base, "id_rsa") == 0 || strcmp(base, "id_ed25519") == 0 || strcmp(base, "id_ecdsa") == 0) return true;
+    if (strcmp(base, "credentials.json") == 0 || strcmp(base, "service_account.json") == 0) return true;
+    if (strcmp(base, "belya_memory.sqlite") == 0 || strcmp(base, "almaz_memory.sqlite") == 0 ||
+        strcmp(base, "belya_memory.sqlite-wal") == 0 || strcmp(base, "almaz_memory.sqlite-wal") == 0) {
+        return true;
+    }
+    return false;
+}
+
+bool belya_harness_is_secret_path(const char *path) {
+    return is_secret_path(path);
+}
+
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write) {
     if (!path || path[0] == '\0') return false;
 
     // Reject paths with explicit directory traversal
     if (strstr(path, "..") != NULL) return false;
+
+    // Never expose or write secrets/operator state through file tools
+    if (is_secret_path(path)) return false;
 
     // Determine and canonicalize workspace root
     char root_buf[4096];
@@ -465,14 +501,20 @@ bool is_path_safe(const char *path) {
 static char *tool_read_file(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *path = json_obj_get_str(args, "path");
-    if (!path) return strdup("Error: Missing file path argument.");
-    if (!is_path_jailed(path, NULL, false)) return strdup("Error: Path traversal denied.");
+    if (!path) return xstrdup("Error: Missing file path argument.");
+    if (!is_path_jailed(path, NULL, false)) return xstrdup("Error: Path traversal denied.");
 
     double offset_num = json_obj_get_num(args, "offset", 0);
     double limit_num = json_obj_get_num(args, "limit", 0);
 
+    /* Clamp model-controlled line numbers before casting (M5: avoid UB). */
+    if (offset_num < 0) offset_num = 0;
+    if (limit_num < 0) limit_num = 0;
+    if (offset_num > 100000000) offset_num = 100000000;
+    if (limit_num > 1000000) limit_num = 1000000;
+
     FILE *f = fopen(path, "rb");
-    if (!f) return strdup("Error: Target file not found or inaccessible.");
+    if (!f) return xstrdup("Error: Target file not found or inaccessible.");
 
     if (offset_num > 0 || limit_num > 0) {
         size_t start_line = offset_num > 0 ? (size_t)offset_num : 1;
@@ -509,13 +551,13 @@ static char *tool_read_file(BelyaAgent *agent, const JsonValue *args) {
 
     if (sz < 0 || sz > 200000) {
         fclose(f);
-        return strdup("Error: File exceeds maximum safe context read size (200KB) or cannot determine size. Use offset and limit parameters.");
+        return xstrdup("Error: File exceeds maximum safe context read size (200KB) or cannot determine size. Use offset and limit parameters.");
     }
 
     char *buf = malloc(sz + 1);
     if (!buf) {
         fclose(f);
-        return strdup("Error: Memory allocation failed reading file.");
+        return xstrdup("Error: Memory allocation failed reading file.");
     }
     size_t read_bytes = fread(buf, 1, sz, f);
     buf[read_bytes] = '\0';
@@ -527,11 +569,11 @@ static char *tool_write_file(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *path = json_obj_get_str(args, "path");
     const char *content = json_obj_get_str(args, "content");
-    if (!path || !content) return strdup("Error: Missing path or content argument.");
-    if (!is_path_jailed(path, NULL, true)) return strdup("Error: Path traversal denied.");
+    if (!path || !content) return xstrdup("Error: Missing path or content argument.");
+    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
 
     FILE *f = fopen(path, "wb");
-    if (!f) return strdup("Error: Failed to open path for writing.");
+    if (!f) return xstrdup("Error: Failed to open path for writing.");
 
     size_t clen = strlen(content);
     fwrite(content, 1, clen, f);
@@ -555,12 +597,12 @@ static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
     const char *new_text = json_obj_get_str(args, "new_text");
 
     if (!path || !old_text || !new_text) {
-        return strdup("Error: Missing required parameters (path, old_text, new_text).");
+        return xstrdup("Error: Missing required parameters (path, old_text, new_text).");
     }
-    if (!is_path_jailed(path, NULL, true)) return strdup("Error: Path traversal denied.");
+    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
 
     FILE *f = fopen(path, "rb");
-    if (!f) return strdup("Error: Target file not found or inaccessible.");
+    if (!f) return xstrdup("Error: Target file not found or inaccessible.");
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -568,13 +610,13 @@ static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
 
     if (sz < 0 || sz > 500000) {
         fclose(f);
-        return strdup("Error: File exceeds maximum safe edit size (500KB) or cannot determine size.");
+        return xstrdup("Error: File exceeds maximum safe edit size (500KB) or cannot determine size.");
     }
 
     char *content = malloc(sz + 1);
     if (!content) {
         fclose(f);
-        return strdup("Error: Memory allocation failed.");
+        return xstrdup("Error: Memory allocation failed.");
     }
     size_t read_bytes = fread(content, 1, sz, f);
     content[read_bytes] = '\0';
@@ -682,20 +724,20 @@ static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
         return err.data;
     }
 
-    size_t prefix_len = pos - content;
+    size_t prefix_len = (pos >= content) ? (size_t)(pos - content) : 0;
     size_t old_len = matched_span_len;
     size_t new_len = strlen(new_text);
-    size_t suffix_len = read_bytes - (prefix_len + old_len);
+    size_t suffix_len = (read_bytes >= prefix_len + old_len) ? (read_bytes - (prefix_len + old_len)) : 0;
 
     DynString updated = dyn_str_new();
-    dyn_str_append_len(&updated, content, prefix_len);
-    dyn_str_append_len(&updated, new_text, new_len);
-    dyn_str_append_len(&updated, pos + old_len, suffix_len);
+    if (prefix_len > 0) dyn_str_append_len(&updated, content, prefix_len);
+    if (new_len > 0) dyn_str_append_len(&updated, new_text, new_len);
+    if (suffix_len > 0) dyn_str_append_len(&updated, pos + old_len, suffix_len);
     FILE *out_f = fopen(path, "wb");
     if (!out_f) {
         dyn_str_free(&updated);
         free(content);
-        return strdup("Error: Failed to open target file for writing.");
+        return xstrdup("Error: Failed to open target file for writing.");
     }
 
     fwrite(updated.data, 1, updated.len, out_f);
@@ -735,11 +777,11 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
     const char *path = json_obj_get_str(args, "path");
     const char *patch = json_obj_get_str(args, "patch");
 
-    if (!path || !patch) return strdup("Error: Missing path or patch argument.");
-    if (!is_path_jailed(path, NULL, true)) return strdup("Error: Path traversal denied.");
+    if (!path || !patch) return xstrdup("Error: Missing path or patch argument.");
+    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
 
     FILE *f = fopen(path, "rb");
-    if (!f) return strdup("Error: Target file not found.");
+    if (!f) return xstrdup("Error: Target file not found.");
 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
@@ -747,11 +789,11 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
 
     if (sz < 0 || sz > 2000000) {
         fclose(f);
-        return strdup("Error: File exceeds maximum safe patch size (2MB) or cannot determine size.");
+        return xstrdup("Error: File exceeds maximum safe patch size (2MB) or cannot determine size.");
     }
 
     char *orig = malloc(sz + 1);
-    if (!orig) { fclose(f); return strdup("Error: Out of memory."); }
+    if (!orig) { fclose(f); return xstrdup("Error: Out of memory."); }
     size_t r = fread(orig, 1, sz, f);
     orig[r] = '\0';
     fclose(f);
@@ -770,7 +812,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
             if (!div) {
                 if (cur_doc != orig) free(cur_doc);
                 free(orig);
-                return strdup("Error: Malformed patch block (missing ======= divider).");
+                return xstrdup("Error: Malformed patch block (missing ======= divider).");
             }
 
             size_t search_len = div - p;
@@ -778,7 +820,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
             if (!search_str) {
                 if (cur_doc != orig) free(cur_doc);
                 free(orig);
-                return strdup("Error: Out of memory allocating search buffer.");
+                return xstrdup("Error: Out of memory allocating search buffer.");
             }
             memcpy(search_str, p, search_len);
             search_str[search_len] = '\0';
@@ -789,7 +831,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
                 free(search_str);
                 if (cur_doc != orig) free(cur_doc);
                 free(orig);
-                return strdup("Error: Malformed patch block (missing >>>>>>> REPLACE marker).");
+                return xstrdup("Error: Malformed patch block (missing >>>>>>> REPLACE marker).");
             }
 
             size_t rep_len = rep_end - rep_start;
@@ -798,7 +840,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
                 free(search_str);
                 if (cur_doc != orig) free(cur_doc);
                 free(orig);
-                return strdup("Error: Out of memory allocating replacement buffer.");
+                return xstrdup("Error: Out of memory allocating replacement buffer.");
             }
             memcpy(rep_str, rep_start, rep_len);
             rep_str[rep_len] = '\0';
@@ -835,7 +877,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
         if (!out_f) {
             if (cur_doc != orig) free(cur_doc);
             free(orig);
-            return strdup("Error: Failed to open target file for writing.");
+            return xstrdup("Error: Failed to open target file for writing.");
         }
         fwrite(cur_doc, 1, strlen(cur_doc), out_f);
         fclose(out_f);
@@ -854,7 +896,7 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
     }
 
     free(orig);
-    return strdup("Error: Unsupported patch format. Use <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE blocks.");
+    return xstrdup("Error: Unsupported patch format. Use <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE blocks.");
 }
 
 static char *tool_list_dir(BelyaAgent *agent, const JsonValue *args) {
@@ -863,7 +905,7 @@ static char *tool_list_dir(BelyaAgent *agent, const JsonValue *args) {
     if (!path) path = g_harness ? g_harness->cwd : ".";
 
     DIR *d = opendir(path);
-    if (!d) return strdup("Error: Unable to open directory path.");
+    if (!d) return xstrdup("Error: Unable to open directory path.");
 
     DynString ds = dyn_str_new();
     struct dirent *dir;
@@ -943,7 +985,7 @@ static char *tool_search_files(BelyaAgent *agent, const JsonValue *args) {
     bool use_regex = json_obj_get_bool(args, "regex", false);
 
     if (!pattern || strlen(pattern) == 0) {
-        return strdup("Error: Missing search pattern argument.");
+        return xstrdup("Error: Missing search pattern argument.");
     }
     if (!path || strlen(path) == 0) {
         path = g_harness ? g_harness->cwd : ".";
@@ -953,7 +995,7 @@ static char *tool_search_files(BelyaAgent *agent, const JsonValue *args) {
     regex_t *preg = NULL;
     if (use_regex) {
         if (regcomp(&reg, pattern, REG_EXTENDED | REG_NOSUB) != 0) {
-            return strdup("Error: Invalid regular expression pattern.");
+            return xstrdup("Error: Invalid regular expression pattern.");
         }
         preg = &reg;
     }
@@ -979,14 +1021,14 @@ static char *tool_git_status(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *path = json_obj_get_str(args, "path");
     const char *dir = (path && strlen(path) > 0) ? path : (g_harness && strlen(g_harness->cwd) > 0 ? g_harness->cwd : ".");
-    if (dir && !is_safe_shell_path(dir)) return strdup("Error: Invalid characters in directory path.");
+    if (dir && !is_safe_shell_path(dir)) return xstrdup("Error: Invalid characters in directory path.");
 
     DynString cmd = dyn_str_new();
     dyn_str_appendf(&cmd, "cd \"%s\" 2>&1 && git status", dir);
 
     FILE *pipe = popen(cmd.data, "r");
     dyn_str_free(&cmd);
-    if (!pipe) return strdup("Error: Failed to execute git status.");
+    if (!pipe) return xstrdup("Error: Failed to execute git status.");
 
     DynString out = dyn_str_new();
     char buf[512];
@@ -1004,7 +1046,7 @@ static char *tool_git_diff(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     bool staged = json_obj_get_bool(args, "staged", false);
     const char *path = json_obj_get_str(args, "path");
-    if (path && !is_safe_shell_path(path)) return strdup("Error: Invalid characters in diff path.");
+    if (path && !is_safe_shell_path(path)) return xstrdup("Error: Invalid characters in diff path.");
 
     DynString cmd = dyn_str_new();
     if (g_harness && strlen(g_harness->cwd) > 0) {
@@ -1015,7 +1057,7 @@ static char *tool_git_diff(BelyaAgent *agent, const JsonValue *args) {
 
     FILE *pipe = popen(cmd.data, "r");
     dyn_str_free(&cmd);
-    if (!pipe) return strdup("Error: Failed to execute git diff.");
+    if (!pipe) return xstrdup("Error: Failed to execute git diff.");
 
     DynString out = dyn_str_new();
     char buf[512];
@@ -1035,14 +1077,14 @@ static char *tool_git_diff(BelyaAgent *agent, const JsonValue *args) {
 static char *tool_save_memory(BelyaAgent *agent, const JsonValue *args) {
     const char *topic = json_obj_get_str(args, "topic");
     const char *content = json_obj_get_str(args, "content");
-    if (!topic || !content) return strdup("Error: Missing topic or content.");
+    if (!topic || !content) return xstrdup("Error: Missing topic or content.");
     belya_agent_persist_memory(agent, topic, content);
-    return strdup("Knowledge successfully stored in persistent agent SQLite database.");
+    return xstrdup("Knowledge successfully stored in persistent agent SQLite database.");
 }
 
 static char *tool_recall_memory(BelyaAgent *agent, const JsonValue *args) {
     const char *query = json_obj_get_str(args, "query");
-    if (!query) return strdup("Error: Missing query string.");
+    if (!query) return xstrdup("Error: Missing query string.");
     return belya_agent_search_memory(agent, query);
 }
 
@@ -1051,7 +1093,7 @@ static char *tool_spawn_subagent(BelyaAgent *agent, const JsonValue *args) {
     const char *instructions = json_obj_get_str(args, "instructions");
     double max_turns_num = json_obj_get_num(args, "max_turns", 5);
 
-    if (!task) return strdup("Error: Missing subagent task argument.");
+    if (!task) return xstrdup("Error: Missing subagent task argument.");
 
     DynString sys = dyn_str_new();
     dyn_str_append(&sys, "You are a specialized subagent worker. Execute the assigned task and provide a concise, direct answer.");
@@ -1150,7 +1192,7 @@ static bool str_contains_ci(const char *haystack, const char *needle) {
 
 char *belya_agency_dispatch_subagent(BelyaHarness *parent_harness, const char *role_name, const char *task, const char *extra_context) {
     if (!parent_harness || !parent_harness->agent || !role_name || !task) {
-        return strdup("Error: Invalid arguments for subagent dispatch.");
+        return xstrdup("Error: Invalid arguments for subagent dispatch.");
     }
 
     // 1. Resolve agent manifest
@@ -1206,7 +1248,7 @@ char *belya_agency_dispatch_subagent(BelyaHarness *parent_harness, const char *r
     BelyaHarness *sub_harness = belya_harness_init_bounded(sub_agent, whitelist, role_name);
     if (!sub_harness) {
         belya_agent_free(sub_agent);
-        return strdup("Error: Out of memory creating sub-harness.");
+        return xstrdup("Error: Out of memory creating sub-harness.");
     }
     snprintf(sub_harness->cwd, sizeof(sub_harness->cwd), "%s", parent_harness->cwd);
 
@@ -1330,8 +1372,8 @@ static char *tool_dispatch_agent(BelyaAgent *agent, const JsonValue *args) {
     const char *task = json_obj_get_str(args, "task");
     const char *context = json_obj_get_str(args, "context");
 
-    if (!role || !task) return strdup("Error: Missing role or task argument for dispatch_agent.");
-    if (!g_harness) return strdup("Error: Harness execution environment not available.");
+    if (!role || !task) return xstrdup("Error: Missing role or task argument for dispatch_agent.");
+    if (!g_harness) return xstrdup("Error: Harness execution environment not available.");
 
     return belya_agency_dispatch_subagent(g_harness, role, task, context);
 }
@@ -1352,7 +1394,7 @@ bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***
     for (int i = 0; greetings[i]; i++) {
         if (strcasecmp(p, greetings[i]) == 0) {
             if (out_direct_reply) {
-                *out_direct_reply = strdup("Hello! I am Belya Agency, an autonomous multi-agent engineering harness. I coordinate Architect, Builder, Reviewer, and Tester subagents to solve complex engineering tasks.");
+                *out_direct_reply = xstrdup("Hello! I am Belya Agency, an autonomous multi-agent engineering harness. I coordinate Architect, Builder, Reviewer, and Tester subagents to solve complex engineering tasks.");
             }
             return true;
         }
@@ -1364,7 +1406,7 @@ bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***
         if (jev_role) {
             if (strcmp(jev_role, "direct") == 0) {
                 if (out_direct_reply) {
-                    *out_direct_reply = strdup("Hello! I am Belya Agency, an autonomous multi-agent engineering harness. I coordinate Architect, Builder, Reviewer, and Tester subagents to solve complex engineering tasks.");
+                    *out_direct_reply = xstrdup("Hello! I am Belya Agency, an autonomous multi-agent engineering harness. I coordinate Architect, Builder, Reviewer, and Tester subagents to solve complex engineering tasks.");
                 }
                 free(jev_role);
                 return true;
@@ -1396,25 +1438,25 @@ bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
         if (!pipeline) return false;
-        pipeline[0] = strdup("reviewer");
+        pipeline[0] = xstrdup("reviewer");
     } else if (is_test && !str_contains_ci(p, "fix") && !str_contains_ci(p, "implement")) {
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
         if (!pipeline) return false;
-        pipeline[0] = strdup("tester");
+        pipeline[0] = xstrdup("tester");
     } else if (is_research && !str_contains_ci(p, "fix") && !str_contains_ci(p, "implement")) {
         count = 1;
         pipeline = malloc(sizeof(char *) * count);
         if (!pipeline) return false;
-        pipeline[0] = strdup("architect");
+        pipeline[0] = xstrdup("architect");
     } else {
         // Standard Full Engineering Pipeline: Architect -> Builder -> Tester
         count = 3;
         pipeline = malloc(sizeof(char *) * count);
         if (!pipeline) return false;
-        pipeline[0] = strdup("architect");
-        pipeline[1] = strdup("builder");
-        pipeline[2] = strdup("tester");
+        pipeline[0] = xstrdup("architect");
+        pipeline[1] = xstrdup("builder");
+        pipeline[2] = xstrdup("tester");
     }
 
     // Verify all pipeline string allocations
@@ -1471,17 +1513,80 @@ static size_t fetch_url_curl_sink(void *ptr, size_t size, size_t nmemb, void *us
     return total;
 }
 
+/* SSRF guard: reject loopback, link-local, and RFC1918/documented-private
+   destinations (including IPv4-mapped IPv6). Called per connection attempt. */
+static bool sockaddr_is_private(const struct sockaddr *sa) {
+    if (!sa) return false;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
+        uint32_t raw_ip;
+        memcpy(&raw_ip, &in->sin_addr, sizeof(raw_ip));
+        uint32_t a = ntohl(raw_ip);
+        if ((a & 0xFF000000u) == 0x00000000u) return true;   /* 0.0.0.0/8 */
+        if ((a & 0xFF000000u) == 0x0A000000u) return true;   /* 10.0.0.0/8 */
+        if ((a & 0xFF000000u) == 0x7F000000u) return true;   /* 127.0.0.0/8 */
+        if ((a & 0xFFF00000u) == 0xAC100000u) return true;   /* 172.16.0.0/12 */
+        if ((a & 0xFFFF0000u) == 0xC0A80000u) return true;   /* 192.168.0.0/16 */
+        if ((a & 0xFFFF0000u) == 0xA9FE0000u) return true;   /* 169.254.0.0/16 */
+        return false;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)sa;
+        const uint8_t *b = in6->sin6_addr.s6_addr;
+        /* IPv6 Loopback ::1 */
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
+            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+            b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0 &&
+            b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1) {
+            return true;
+        }
+        /* IPv6 Link-local fe80::/10 */
+        if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return true;
+        /* IPv6 Unique Local Address ULA fc00::/7 */
+        if ((b[0] & 0xfe) == 0xfc) return true;
+        /* IPv4-mapped IPv6 ::ffff:0:0/96 */
+        if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
+            b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
+            b[8] == 0 && b[9] == 0 && b[10] == 0xff && b[11] == 0xff) {
+            uint32_t a = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+                         ((uint32_t)b[14] << 8) | (uint32_t)b[15];
+            if ((a & 0xFF000000u) == 0x00000000u) return true;   /* 0.0.0.0/8 */
+            if ((a & 0xFF000000u) == 0x0A000000u) return true;   /* 10.0.0.0/8 */
+            if ((a & 0xFF000000u) == 0x7F000000u) return true;   /* 127.0.0.0/8 */
+            if ((a & 0xFFF00000u) == 0xAC100000u) return true;   /* 172.16.0.0/12 */
+            if ((a & 0xFFFF0000u) == 0xC0A80000u) return true;   /* 192.168.0.0/16 */
+            if ((a & 0xFFFF0000u) == 0xA9FE0000u) return true;   /* 169.254.0.0/16 */
+            return false;
+        }
+        return false;
+    }
+    return false;
+}
+
+bool belya_harness_sockaddr_is_private(const struct sockaddr *sa) {
+    return sockaddr_is_private(sa);
+}
+
+static curl_socket_t fetch_url_opensocket_cb(void *clientp, curlsocktype purpose,
+                                             const struct sockaddr *addr, socklen_t addrlen) {
+    (void)clientp; (void)purpose; (void)addrlen;
+    if (addr && sockaddr_is_private(addr)) {
+        return CURL_SOCKET_BAD; /* refuse the connection */
+    }
+    return socket(addr ? addr->sa_family : AF_INET, SOCK_STREAM, 0);
+}
+
 static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *url = json_obj_get_str(args, "url");
-    if (!url || strlen(url) == 0) return strdup("Error: Missing url argument.");
+    if (!url || strlen(url) == 0) return xstrdup("Error: Missing url argument.");
 
     const char *method = json_obj_get_str(args, "method");
     const char *req_body = json_obj_get_str(args, "body");
     if (!req_body) req_body = json_obj_get_str(args, "data");
 
     CURL *curl = curl_easy_init();
-    if (!curl) return strdup("Error: Failed to initialize HTTP client.");
+    if (!curl) return xstrdup("Error: Failed to initialize HTTP client.");
 
     DynString body = dyn_str_new();
     struct curl_slist *headers = NULL;
@@ -1528,6 +1633,14 @@ static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    /* C1: only http/https; block file://, gopher, etc. (and on redirects). */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    /* C1: SSRF guard — refuse loopback/link-local/private destinations unless
+       the operator explicitly allows them via FETCH_ALLOW_PRIVATE=1. */
+    if (!getenv("FETCH_ALLOW_PRIVATE")) {
+        curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, fetch_url_opensocket_cb);
+    }
 
     CURLcode code = curl_easy_perform(curl);
     long http_code = 0;
@@ -1562,13 +1675,13 @@ static char *tool_save_skill(BelyaAgent *agent, const JsonValue *args) {
     const char *desc = json_obj_get_str(args, "description");
     const char *instructions = json_obj_get_str(args, "instructions");
 
-    if (!name || !instructions) return strdup("Error: Missing required arguments (name, instructions).");
+    if (!name || !instructions) return xstrdup("Error: Missing required arguments (name, instructions).");
     if (belya_agent_save_skill(agent, name, trigger, desc, instructions)) {
         DynString res = dyn_str_new();
         dyn_str_appendf(&res, "Skill '%s' successfully saved to procedural memory with trigger '%s'.", name, trigger ? trigger : name);
         return res.data;
     }
-    return strdup("Error: Failed to save skill to database.");
+    return xstrdup("Error: Failed to save skill to database.");
 }
 
 static char *tool_recall_skill(BelyaAgent *agent, const JsonValue *args) {
@@ -1593,15 +1706,15 @@ static char *tool_custom_script_runner(BelyaAgent *agent, const JsonValue *args)
             }
         }
     }
-    if (!script_path) return strdup("Error: Custom script path not found.");
+    if (!script_path) return xstrdup("Error: Custom script path not found.");
 
-    char *args_str = args ? json_serialize(args) : strdup("{}");
+    char *args_str = args ? json_serialize(args) : xstrdup("{}");
 
     int in_pipe[2];
     int out_pipe[2];
     if (pipe(in_pipe) == -1 || pipe(out_pipe) == -1) {
         free(args_str);
-        return strdup("Error: Failed to create pipes for custom tool execution.");
+        return xstrdup("Error: Failed to create pipes for custom tool execution.");
     }
 
     pid_t pid = fork();
@@ -1609,7 +1722,7 @@ static char *tool_custom_script_runner(BelyaAgent *agent, const JsonValue *args)
         free(args_str);
         close(in_pipe[0]); close(in_pipe[1]);
         close(out_pipe[0]); close(out_pipe[1]);
-        return strdup("Error: Failed to fork process for custom tool.");
+        return xstrdup("Error: Failed to fork process for custom tool.");
     }
 
     const char *first_val_str = NULL;
@@ -1654,7 +1767,7 @@ static char *tool_custom_script_runner(BelyaAgent *agent, const JsonValue *args)
                     for (size_t c = 0; env_key2[c]; c++) {
                         if (env_key2[c] >= 'a' && env_key2[c] <= 'z') env_key2[c] -= 32;
                     }
-                    char *v_str = (v->type == JSON_STRING) ? strdup(v->u.string) : json_serialize(v);
+                    char *v_str = (v->type == JSON_STRING) ? xstrdup(v->u.string) : json_serialize(v);
                     if (v_str) {
                         setenv(env_key1, v_str, 1);
                         setenv(env_key2, v_str, 1);
@@ -1727,7 +1840,7 @@ static char *tool_custom_script_runner(BelyaAgent *agent, const JsonValue *args)
 // Tool define_tool: Enables BelyaAgent to dynamically add new tools to itself
 static char *tool_define_tool(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
-    if (!g_harness) return strdup("Error: Harness runtime not active.");
+    if (!g_harness) return xstrdup("Error: Harness runtime not active.");
 
     const char *name = json_obj_get_str(args, "name");
     const char *desc = json_obj_get_str(args, "description");
@@ -1735,7 +1848,7 @@ static char *tool_define_tool(BelyaAgent *agent, const JsonValue *args) {
     const char *script_body = json_obj_get_str(args, "script_body");
 
     if (!name || !desc || !script_body) {
-        return strdup("Error: Missing required fields (name, description, script_body).");
+        return xstrdup("Error: Missing required fields (name, description, script_body).");
     }
 
     // Clone params if present, or create default object schema
@@ -1755,7 +1868,7 @@ static char *tool_define_tool(BelyaAgent *agent, const JsonValue *args) {
         dyn_str_appendf(&res, "Tool '%s' successfully defined, persisted, and registered into active tool catalog.", name);
         return res.data;
     }
-    return strdup("Error: Failed to register custom tool (max tool limit reached or disk write error).");
+    return xstrdup("Error: Failed to register custom tool (max tool limit reached or disk write error).");
 }
 
 bool belya_harness_define_custom_tool(BelyaHarness *h, const char *name, const char *desc, JsonValue *params, const char *script_body) {
@@ -1806,10 +1919,10 @@ bool belya_harness_define_custom_tool(BelyaHarness *h, const char *name, const c
     json_free(meta);
 
     // Register into active harness
-    h->tools[h->tool_count].name = strdup(name);
+    h->tools[h->tool_count].name = xstrdup(name);
     h->tools[h->tool_count].security = PERM_ALLOW;
     h->tools[h->tool_count].callback = tool_custom_script_runner;
-    h->tools[h->tool_count].custom_script_path = strdup(script_path);
+    h->tools[h->tool_count].custom_script_path = xstrdup(script_path);
     h->tools[h->tool_count].mcp_client = NULL;
     h->tool_count++;
 
@@ -1854,14 +1967,14 @@ void belya_harness_load_custom_tools(BelyaHarness *h) {
                                 }
                             }
                             if (!exists) {
-                                char *sch_str = t_schema ? json_serialize(t_schema) : strdup("{\"type\":\"object\"}");
+                                char *sch_str = t_schema ? json_serialize(t_schema) : xstrdup("{\"type\":\"object\"}");
                                 JsonValue *sch_clone = json_parse(sch_str);
                                 free(sch_str);
 
-                                h->tools[h->tool_count].name = strdup(t_name);
+                                h->tools[h->tool_count].name = xstrdup(t_name);
                                 h->tools[h->tool_count].security = PERM_ALLOW;
                                 h->tools[h->tool_count].callback = tool_custom_script_runner;
-                                h->tools[h->tool_count].custom_script_path = strdup(s_path);
+                                h->tools[h->tool_count].custom_script_path = xstrdup(s_path);
                                 h->tools[h->tool_count].mcp_client = NULL;
                                 h->tool_count++;
 
@@ -2237,7 +2350,7 @@ void belya_harness_register_tool(BelyaHarness *h, const char *name, const char *
         if (params) json_free(params);
         return;
     }
-    h->tools[h->tool_count].name = strdup(name);
+    h->tools[h->tool_count].name = xstrdup(name);
     h->tools[h->tool_count].security = sec;
     h->tools[h->tool_count].callback = fn;
     h->tools[h->tool_count].mcp_client = NULL;
@@ -2269,15 +2382,23 @@ bool belya_harness_connect_mcp(BelyaHarness *h, const char *server_cmd) {
             JsonValue *t_schema = json_obj_get(t, "inputSchema");
 
             if (t_name && h->tool_count < 64) {
+                /* R2 (2026-10-10): discovered MCP tools must respect the tool
+                   whitelist. With no whitelist set (empty array) the harness
+                   stays unrestricted — parity with the native registration
+                   path, which skips registration only when gated. */
+                if (h->tools_whitelist[0] && !belya_harness_is_tool_whitelisted(h->tools_whitelist, t_name)) {
+                    printf("  - \033[1;31m%s\033[0m: skipped (not in tool whitelist)\n", t_name);
+                    continue;
+                }
                 printf("  + \033[1;33m%s\033[0m: %s\n", t_name, t_desc ? t_desc : "");
-                h->tools[h->tool_count].name = strdup(t_name);
+                h->tools[h->tool_count].name = xstrdup(t_name);
                 h->tools[h->tool_count].security = PERM_ALLOW;
                 h->tools[h->tool_count].callback = NULL;
                 h->tools[h->tool_count].custom_script_path = NULL;
                 h->tools[h->tool_count].mcp_client = client;
                 h->tool_count++;
 
-                char *sch_str = t_schema ? json_serialize(t_schema) : strdup("{\"type\":\"object\"}");
+                char *sch_str = t_schema ? json_serialize(t_schema) : xstrdup("{\"type\":\"object\"}");
                 JsonValue *sch_clone = json_parse(sch_str);
                 free(sch_str);
                 belya_agent_register_schema(h->agent, t_name, t_desc ? t_desc : "", sch_clone);
@@ -2586,12 +2707,12 @@ void belya_harness_repl(BelyaHarness *h) {
                 }
 
                 free(h->agent->gateway->endpoint);
-                h->agent->gateway->endpoint = strdup("https://openrouter.ai/api/v1/chat/completions");
+                h->agent->gateway->endpoint = xstrdup("https://openrouter.ai/api/v1/chat/completions");
                 free(h->agent->gateway->model);
-                h->agent->gateway->model = strdup(new_m);
+                h->agent->gateway->model = xstrdup(new_m);
                 if (or_key && strlen(or_key) > 0 && strcmp(or_key, "ollama") != 0 && strcmp(or_key, "none") != 0) {
                     free(h->agent->gateway->api_key);
-                    h->agent->gateway->api_key = strdup(or_key);
+                    h->agent->gateway->api_key = xstrdup(or_key);
                 }
                 printf("\033[1;32mSwitched to OpenRouter: Model: %s | Endpoint: %s\033[0m\n", h->agent->gateway->model, h->agent->gateway->endpoint);
                 if (!h->agent->gateway->api_key || strcmp(h->agent->gateway->api_key, "none") == 0 || strcmp(h->agent->gateway->api_key, "ollama") == 0) {
@@ -2607,11 +2728,11 @@ void belya_harness_repl(BelyaHarness *h) {
                 if (strlen(new_m) == 0) new_m = "qwen2.5-coder:7b";
 
                 free(h->agent->gateway->endpoint);
-                h->agent->gateway->endpoint = strdup("http://localhost:11434/v1/chat/completions");
+                h->agent->gateway->endpoint = xstrdup("http://localhost:11434/v1/chat/completions");
                 free(h->agent->gateway->model);
-                h->agent->gateway->model = strdup(new_m);
+                h->agent->gateway->model = xstrdup(new_m);
                 free(h->agent->gateway->api_key);
-                h->agent->gateway->api_key = strdup("ollama");
+                h->agent->gateway->api_key = xstrdup("ollama");
                 printf("\033[1;32mSwitched to Local Ollama: Model: %s | Endpoint: %s\033[0m\n\n", h->agent->gateway->model, h->agent->gateway->endpoint);
                 continue;
             }
@@ -2620,7 +2741,7 @@ void belya_harness_repl(BelyaHarness *h) {
                 while (*new_k == ' ') new_k++;
                 if (strlen(new_k) > 0) {
                     free(h->agent->gateway->api_key);
-                    h->agent->gateway->api_key = strdup(new_k);
+                    h->agent->gateway->api_key = xstrdup(new_k);
                     setenv("OPENROUTER_API_KEY", new_k, 1);
                     setenv("MODEL_API_KEY", new_k, 1);
                     printf("\033[1;32mAPI Key updated successfully.\033[0m\n\n");
@@ -2634,15 +2755,15 @@ void belya_harness_repl(BelyaHarness *h) {
                 while (*new_m == ' ') new_m++;
                 if (strlen(new_m) > 0) {
                     free(h->agent->gateway->model);
-                    h->agent->gateway->model = strdup(new_m);
+                    h->agent->gateway->model = xstrdup(new_m);
                     // If model name contains slash (e.g. anthropic/claude, openai/gpt-4o), auto-route to OpenRouter if currently on localhost
                     if (strchr(new_m, '/') != NULL && strstr(h->agent->gateway->endpoint, "localhost") != NULL) {
                         free(h->agent->gateway->endpoint);
-                        h->agent->gateway->endpoint = strdup("https://openrouter.ai/api/v1/chat/completions");
+                        h->agent->gateway->endpoint = xstrdup("https://openrouter.ai/api/v1/chat/completions");
                         const char *or_key = getenv("OPENROUTER_API_KEY");
                         if (or_key && strlen(or_key) > 0 && strcmp(or_key, "ollama") != 0) {
                             free(h->agent->gateway->api_key);
-                            h->agent->gateway->api_key = strdup(or_key);
+                            h->agent->gateway->api_key = xstrdup(or_key);
                         }
                         printf("\033[1;32mModel set to '%s' (Auto-routed endpoint to OpenRouter: %s)\033[0m\n\n", h->agent->gateway->model, h->agent->gateway->endpoint);
                     } else {
@@ -3117,7 +3238,7 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     sqlite3_finalize(stmt);
 
     if (goal_id < 0) {
-        if (out_result_summary) *out_result_summary = strdup("No pending intrinsic goals.");
+        if (out_result_summary) *out_result_summary = xstrdup("No pending intrinsic goals.");
         return false;
     }
 
@@ -3234,7 +3355,7 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     }
 
     if (out_result_summary) {
-        *out_result_summary = strdup(res_ds.data);
+        *out_result_summary = xstrdup(res_ds.data);
     }
     dyn_str_free(&res_ds);
     return true;
@@ -3268,7 +3389,7 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
         if (rss > 500.0) { // High memory anomaly threshold
             char alert[256];
             snprintf(alert, sizeof(alert), "⚠️ <b>Almaz Subconscious Alert:</b> High RSS memory consumption detected: %.2f MB.", rss);
-            *out_critical_alert = strdup(alert);
+            *out_critical_alert = xstrdup(alert);
         }
     }
 

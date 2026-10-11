@@ -5,6 +5,8 @@
 #include "timeline_anomaly.h"
 #include <assert.h>
 #include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 void test_dyn_string(void) {
     printf("[Test] DynString Operations...\n");
@@ -2052,6 +2054,45 @@ static void test_emotional_appraisal(void) {
     printf("  -> VIGIL Emotional Appraisal State Machine PASSED\n");
 }
 
+static void test_recent_form_metric(void) {
+    printf("[Test] Measured Recent Form & Escalation Gates (M2.1/R6a)...\n");
+    BelyaAgent agent;
+    memset(&agent, 0, sizeof(agent));
+    agent.recent_form = 1.0f;
+    agent.confidence = 0.70f;
+    agent.frustration = 0.00f;
+
+    /* A clean start is "in form": no distress, no escalation. */
+    assert(almaz_agent_distress(&agent) == 0.0f);
+
+    /* Consecutive failures must move the MEASURED metric. */
+    for (int i = 0; i < 8; i++) almaz_agent_record_appraisal(&agent, false);
+    assert(agent.recent_form < 0.35f);
+    assert(almaz_agent_distress(&agent) > 0.60f);   /* warning tier reachable */
+    assert(agent.recent_form_samples == 8);
+
+    /* The clamped spec fields still saturate exactly as asserted elsewhere. */
+    assert(agent.confidence == 0.0f);
+    assert(agent.frustration == 1.0f);
+
+    /* Recovery brings measured form back above the notice tier. */
+    for (int i = 0; i < 8; i++) almaz_agent_record_appraisal(&agent, true);
+    assert(almaz_agent_distress(&agent) < 0.35f);
+
+    /* Decay is bounded and monotone toward neutral, never overshooting. */
+    agent.recent_form = 0.0f;
+    for (int i = 0; i < 500; i++) almaz_agent_recent_form_decay(&agent);
+    assert(agent.recent_form > 0.70f && agent.recent_form <= 0.75f + 0.0001f);
+
+    /* Out-of-range observations are clamped, never propagated. */
+    almaz_agent_recent_form_observe(&agent, 99.0f);
+    assert(agent.recent_form <= 1.0f);
+    almaz_agent_recent_form_observe(&agent, -99.0f);
+    assert(agent.recent_form >= 0.0f);
+
+    printf("  -> Measured Recent Form & Escalation Gates PASSED\n");
+}
+
 static void test_knowself_memory_gating(void) {
     printf("[Test] KnowSelf Situational Memory Gating...\n");
     assert(almaz_should_retrieve_memory("Do you remember our discussion yesterday?"));
@@ -2431,6 +2472,226 @@ assert(goals == 1);
     printf("  -> Timeline Anomaly PASSED\n");
 }
 
+void test_security_adversarial_suite(void) {
+    printf("[Test] Security & Adversarial Hardening Suite (SSRF, Path Jailing, Fuzzing, SQLi)...\n");
+
+    // 1. SSRF Guard: IPv4 Private / Loopback / Link-Local / Multicast / Broadcast vs Public
+    {
+        struct sockaddr_in sin;
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+
+        // Loopback (127.0.0.0/8)
+        inet_pton(AF_INET, "127.0.0.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+        inet_pton(AF_INET, "127.255.255.255", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Current network / Zero (0.0.0.0/8)
+        inet_pton(AF_INET, "0.0.0.0", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+        inet_pton(AF_INET, "0.255.255.255", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Private RFC1918 10.0.0.0/8
+        inet_pton(AF_INET, "10.0.0.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+        inet_pton(AF_INET, "10.254.12.34", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Private RFC1918 172.16.0.0/12
+        inet_pton(AF_INET, "172.16.0.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+        inet_pton(AF_INET, "172.31.255.254", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Public adjacent to 172.16/12
+        inet_pton(AF_INET, "172.15.255.255", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == false);
+        inet_pton(AF_INET, "172.32.0.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == false);
+
+        // Private RFC1918 192.168.0.0/16
+        inet_pton(AF_INET, "192.168.0.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+        inet_pton(AF_INET, "192.168.100.50", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Link-local / AWS metadata (169.254.0.0/16)
+        inet_pton(AF_INET, "169.254.169.254", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == true);
+
+        // Public routable IPs
+        inet_pton(AF_INET, "8.8.8.8", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == false);
+        inet_pton(AF_INET, "1.1.1.1", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == false);
+        inet_pton(AF_INET, "142.250.190.46", &sin.sin_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin) == false);
+    }
+
+    // 2. SSRF Guard: IPv6 Loopback, ULA, Link-local, IPv4-mapped
+    {
+        struct sockaddr_in6 sin6;
+        memset(&sin6, 0, sizeof(sin6));
+        sin6.sin6_family = AF_INET6;
+
+        // Loopback (::1)
+        inet_pton(AF_INET6, "::1", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+
+        // Link-local (fe80::/10)
+        inet_pton(AF_INET6, "fe80::1", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+
+        // Unique Local Address ULA (fc00::/7)
+        inet_pton(AF_INET6, "fc00::1", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+        inet_pton(AF_INET6, "fd12:3456:789a:1::1", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+
+        // IPv4-mapped private IPv6
+        inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+        inet_pton(AF_INET6, "::ffff:10.0.0.2", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+        inet_pton(AF_INET6, "::ffff:169.254.169.254", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == true);
+
+        // IPv4-mapped public IPv6
+        inet_pton(AF_INET6, "::ffff:8.8.8.8", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == false);
+
+        // Public IPv6
+        inet_pton(AF_INET6, "2001:4860:4860::8888", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == false);
+        inet_pton(AF_INET6, "2606:4700:4700::1111", &sin6.sin6_addr);
+        assert(belya_harness_sockaddr_is_private((const struct sockaddr *)&sin6) == false);
+    }
+
+    // 3. Secret Path Exfiltration Blocker
+    {
+        // Must reject all secret files & paths
+        assert(belya_harness_is_secret_path(".env") == true);
+        assert(belya_harness_is_secret_path(".env.production") == true);
+        assert(belya_harness_is_secret_path(".env.local") == true);
+        assert(belya_harness_is_secret_path("config/.env") == true);
+        assert(belya_harness_is_secret_path("budget_state.txt") == true);
+        assert(belya_harness_is_secret_path(".deploy_state") == true);
+        assert(belya_harness_is_secret_path("id_rsa") == true);
+        assert(belya_harness_is_secret_path("id_ed25519") == true);
+        assert(belya_harness_is_secret_path("id_ecdsa") == true);
+        assert(belya_harness_is_secret_path("credentials.json") == true);
+        assert(belya_harness_is_secret_path("service_account.json") == true);
+        assert(belya_harness_is_secret_path("/home/user/.ssh/id_rsa") == true);
+        assert(belya_harness_is_secret_path("/repo/.git/config") == true);
+        assert(belya_harness_is_secret_path("/root/.aws/credentials") == true);
+        assert(belya_harness_is_secret_path("/root/.config/gcloud/credentials.db") == true);
+        assert(belya_harness_is_secret_path("belya_memory.sqlite") == true);
+        assert(belya_harness_is_secret_path("almaz_memory.sqlite") == true);
+        assert(belya_harness_is_secret_path("belya_memory.sqlite-wal") == true);
+        assert(belya_harness_is_secret_path("almaz_memory.sqlite-wal") == true);
+
+        // Path jailing must block them even if in workspace
+        assert(is_path_jailed(".env", NULL, false) == false);
+        assert(is_path_jailed(".env", NULL, true) == false);
+        assert(is_path_jailed(".ssh/id_rsa", NULL, false) == false);
+        assert(is_path_jailed(".git/config", NULL, false) == false);
+        assert(is_path_jailed("belya_memory.sqlite", NULL, false) == false);
+        assert(is_path_jailed("almaz_memory.sqlite", NULL, false) == false);
+
+        // Legitimate files must pass
+        assert(belya_harness_is_secret_path("main.c") == false);
+        assert(belya_harness_is_secret_path("src/belya_agent.c") == false);
+        assert(belya_harness_is_secret_path("README.md") == false);
+        assert(belya_harness_is_secret_path("environment.c") == false);
+    }
+
+    // 4. MiniJSON Fuzzing & Malformed Payload Resilience
+    {
+        // Null pointer check
+        assert(json_parse(NULL) == NULL);
+
+        // Empty string
+        assert(json_parse("") == NULL);
+        assert(json_parse("   ") == NULL);
+
+        // Unclosed braces / brackets
+        assert(json_parse("{") == NULL);
+        assert(json_parse("[") == NULL);
+        assert(json_parse("{\"key\": \"val\"") == NULL);
+        assert(json_parse("{\"key\": [1, 2, 3}") == NULL);
+
+        // Trailing commas, missing values, unquoted keys, undefined
+        assert(json_parse("{\"a\": 1, }") == NULL);
+        assert(json_parse("{123: 456}") == NULL);
+        assert(json_parse("{\"a\": undefined}") == NULL);
+        assert(json_parse("{\"a\": }") == NULL);
+
+        // Unterminated strings and escape sequences
+        assert(json_parse("{\"a\": \"unterminated") == NULL);
+        assert(json_parse("{\"a\": [1, 2,") == NULL);
+        assert(json_parse("{\"a\": true, \"b\":") == NULL);
+
+        // Deep nesting recursion bomb test (>128 levels)
+        char deep_nested[1000];
+        memset(deep_nested, '[', 300);
+        memset(deep_nested + 300, ']', 300);
+        deep_nested[600] = '\0';
+        JsonValue *deep_v = json_parse(deep_nested);
+        // JSON_MAX_DEPTH is 128, so 300 levels deep MUST fail safely with NULL
+        assert(deep_v == NULL);
+
+        // Valid boundary JSON within depth limit
+        char valid_nested[100];
+        memset(valid_nested, '[', 30);
+        memset(valid_nested + 30, ']', 30);
+        valid_nested[60] = '\0';
+        JsonValue *valid_v = json_parse(valid_nested);
+        assert(valid_v != NULL);
+        json_free(valid_v);
+    }
+
+    // 5. SQLite Memory Layer SQL Injection Resistance
+    {
+        ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+        BelyaAgent *agent = belya_agent_init(gw, "test_sqli_almaz_mem.sqlite", NULL);
+        assert(agent != NULL);
+
+        // Inject quotes and SQL control characters in topic and content
+        const char *sqli_topic = "test'; DROP TABLE memories; --";
+        const char *sqli_content = "Robert'); DROP TABLE students;-- ' OR '1'='1";
+        belya_agent_persist_memory(agent, sqli_topic, sqli_content);
+
+        // Search must work safely and retrieve the payload without executing it
+        char *search_res = belya_agent_search_memory(agent, "Robert");
+        assert(search_res != NULL);
+        assert(strstr(search_res, "DROP TABLE students") != NULL);
+        free(search_res);
+
+        // Ensure memories table still exists and is not corrupted
+        char *search_topic = belya_agent_search_memory(agent, "DROP TABLE memories");
+        assert(search_topic != NULL);
+        free(search_topic);
+
+        // Test SQL injection in skill name / triggers
+        bool saved_skill = belya_agent_save_skill(agent, "sqli_skill", "'; DELETE FROM skills; --",
+                                                 "Skill SQLi test", "Safe body");
+        assert(saved_skill == true);
+
+        char *skill_search = belya_agent_search_skills(agent, "DELETE FROM skills");
+        assert(skill_search != NULL);
+        assert(strstr(skill_search, "sqli_skill") != NULL);
+        free(skill_search);
+
+        belya_agent_free(agent);
+        model_gateway_free(gw);
+        unlink("test_sqli_almaz_mem.sqlite");
+    }
+
+    printf("  -> Security & Adversarial Hardening Suite PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2469,11 +2730,14 @@ int main(void) {
     test_jev_client();
     test_self_model_lifecycle();
     test_emotional_appraisal();
+    test_recent_form_metric();
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
-    printf("================ All Tests Passed Successfully (41/41 - 100%%) ================\n\n");
+    test_security_adversarial_suite();
+    printf("================ All Tests Passed Successfully (43/43 - 100%%) ================\n\n");
     return 0;
 }
+

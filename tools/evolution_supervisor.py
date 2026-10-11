@@ -21,6 +21,7 @@ import resource
 import urllib.request
 import urllib.parse
 import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -353,6 +354,100 @@ def evaluate_novelty_gate(candidate_mut, history, workspace_dir=WORKSPACE_DIR):
 
     return True, "Novel phenotype verified", patch_sha256, sig_sha256
 
+ALLOWED_DYNAMIC_TARGETS = ["minijson.c", "minifrontmatter.c", "linenoise.c"]
+
+def generate_dynamic_llm_mutation(history, env):
+    """
+    Dynamically requests a novel, safe C99 micro-optimization candidate from the LLM
+    when static pool mutations are exhausted.
+    Strictly constrained to whitelist files, single hunk, JSON schema, and novelty gate.
+    """
+    print("[*] Generating dynamic LLM mutation candidate...")
+    api_key = env.get("MODEL_API_KEY") or env.get("OPENROUTER_API_KEY") or env.get("OPENCODE_API_KEY")
+    endpoint = env.get("MODEL_ENDPOINT") or "https://opencode.ai/zen/go/v1/chat/completions"
+    model = env.get("MODEL_NAME") or "opencode-go"
+
+    if not api_key:
+        print("[!] No API key available in env for dynamic mutation generator.")
+        return None
+
+    # Pick an allowed target file that exists in workspace
+    candidates_files = [f for f in ALLOWED_DYNAMIC_TARGETS if (WORKSPACE_DIR / f).exists()]
+    if not candidates_files:
+        return None
+
+    # Rotate target file based on history count
+    target_filename = candidates_files[len(history) % len(candidates_files)]
+    target_path = WORKSPACE_DIR / target_filename
+    target_code = target_path.read_text(errors="ignore")
+
+    # Select representative code slice (up to 150 lines)
+    sample_code = "\n".join(target_code.splitlines()[:150])
+
+    prompt = (
+        f"You are a principal C99 systems engineer specializing in zero-overhead micro-optimizations.\n"
+        f"Here is a snippet from '{target_filename}':\n"
+        f"```c\n{sample_code}\n```\n\n"
+        f"Propose a single safe, micro-optimizing mutation for '{target_filename}'.\n"
+        f"Rules:\n"
+        f"1. Target ONLY '{target_filename}'.\n"
+        f"2. 'old' must be an exact verbatim substring in '{target_filename}' (between 3 and 15 lines).\n"
+        f"3. 'new' must be the optimized replacement with identical semantics and zero memory leaks under ASan.\n"
+        f"4. Do NOT change public function prototypes or API contracts.\n"
+        f"5. Return strictly valid JSON with no markdown wrapping or explanation:\n"
+        f'{{"id": "dyn_{target_filename[:7]}_{int(time.time()) % 10000}", "name": "Dynamic optimization of {target_filename}", "target_file": "{target_filename}", "old": "...", "new": "...", "description": "..."}}'
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a C99 code optimizer. Output only raw JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    try:
+        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                print(f"[!] Dynamic mutation API error: HTTP {resp.status}")
+                return None
+            res_json = json.loads(resp.read().decode("utf-8"))
+            content = res_json["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1]
+                if content.endswith("```"):
+                    content = content.rsplit("```", 1)[0]
+                content = content.strip()
+
+            mut = json.loads(content)
+            if mut.get("target_file") not in ALLOWED_DYNAMIC_TARGETS:
+                print(f"[!] Dynamic mutation rejected: unauthorized target {mut.get('target_file')}")
+                return None
+            if not mut.get("old") or not mut.get("new") or not mut.get("id"):
+                print("[!] Dynamic mutation rejected: missing required keys")
+                return None
+            if mut["old"] not in target_code:
+                print(f"[!] Dynamic mutation rejected: 'old' snippet not found verbatim in {mut['target_file']}")
+                return None
+
+            is_novel, reason, _, _ = evaluate_novelty_gate(mut, history, WORKSPACE_DIR)
+            if not is_novel:
+                print(f"[!] Dynamic mutation gated out: {reason}")
+                return None
+
+            print(f"[+] Dynamic LLM Mutation Generated: {mut['name']} ({mut['id']})")
+            return mut
+    except Exception as e:
+        print(f"[!] Dynamic mutation generation failed: {e}")
+        return None
+
 def run_self_evolution(force_retest=False):
     """Runs sandbox mutation, ASan testing, Darwinian fitness scoring, patch export, and git commit."""
     print("\n--- PHASE 2: AUTONOMOUS METAMORPHIC SELF-EVOLUTION ---")
@@ -370,11 +465,6 @@ def run_self_evolution(force_retest=False):
             if m["old"] in content:
                 unapplied.append(m)
 
-    if not unapplied:
-        msg = f"All {len(MUTATION_POOL)} mutations from current pool already applied or baseline optimal."
-        print(f"[*] {msg}")
-        return False, msg, 0.0, None, None
-
     # 2. Darwinian Novelty Gate: Filter out previously failed phenotypes
     novel_candidates = []
     gated_out = []
@@ -389,14 +479,21 @@ def run_self_evolution(force_retest=False):
             gated_out.append((m, reason, p_hash))
             print(f"[!] Novelty Gated Out: {m['name']} -> {reason}")
 
+    # If static candidates are exhausted or all gated out, trigger dynamic LLM mutation generator
     if not novel_candidates:
-        msg = (
-            f"Darwinian Novelty Gate: All {len(unapplied)} unapplied candidate(s) were previously "
-            f"rejected failed phenotypes ({len(gated_out)} blocked by SHA-256 taboo filter). "
-            f"0 novel phenotypes available in pool."
-        )
-        print(f"[*] {msg}")
-        return False, msg, 0.0, None, None
+        print(f"[*] Darwinian Novelty Gate: Static candidates exhausted. Triggering Dynamic LLM Mutation Generator...")
+        env = load_env()
+        dyn_mut = generate_dynamic_llm_mutation(history, env)
+        if dyn_mut:
+            novel_candidates.append(dyn_mut)
+        else:
+            msg = (
+                f"Darwinian Novelty Gate: All {len(unapplied)} unapplied candidate(s) were previously "
+                f"rejected failed phenotypes ({len(gated_out)} blocked by SHA-256 taboo filter). "
+                f"Dynamic LLM generator produced 0 novel candidates."
+            )
+            print(f"[*] {msg}")
+            return False, msg, 0.0, None, None
 
     # Pick the mutation from novel_candidates that was tested least recently
     def sort_key(m):
@@ -583,8 +680,21 @@ def run_self_evolution(force_retest=False):
 # =========================================================================
 # Phase 3: Real Head-to-Head Arena Benchmark
 # =========================================================================
-def measure_binary_execution(bin_path, args, cwd):
-    """Spawns binary, measures real wall-clock duration and peak RSS from /proc or rusage."""
+ARENA_TIMEOUT_SEC = 90          # hard wall-clock cap per measured binary
+
+
+def measure_binary_execution(bin_path, args, cwd, timeout=ARENA_TIMEOUT_SEC):
+    """Spawns binary, measures real wall-clock duration and peak RSS.
+
+    Robustness (2026-10-11):
+      * stdout/stderr -> TEMP FILE, not an undrained PIPE. The previous version
+        polled the child to completion before draining its pipe, so a measured
+        binary producing more than the 64 KiB pipe buffer would block on write
+        and stall the arena forever.
+      * stdin=DEVNULL is REQUIRED: the verification battery reaches the
+        interactive permission gate (fgets on stdin) and otherwise blocks.
+      * hard timeout: a hanging candidate can never stall the nightly mission.
+    """
     if not bin_path.exists():
         return {"status": "NOT FOUND", "duration": 0.0, "rss": "N/A", "loc": 0}
 
@@ -596,25 +706,33 @@ def measure_binary_execution(bin_path, args, cwd):
     except Exception:
         loc = 0
 
-    t_start = time.perf_counter()
-    proc = subprocess.Popen([str(bin_path)] + args, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    with tempfile.TemporaryFile() as sink:
+        t_start = time.perf_counter()
+        proc = subprocess.Popen([str(bin_path)] + list(args), cwd=cwd,
+                                stdin=subprocess.DEVNULL, stdout=sink, stderr=sink,
+                                text=True)
 
-    peak_rss_kb = 0
-    # On Linux, poll /proc/{pid}/status for VmHWM (Peak Resident Set Size)
-    status_file = Path(f"/proc/{proc.pid}/status")
-    while proc.poll() is None:
-        if status_file.exists():
-            try:
-                for line in status_file.read_text().splitlines():
-                    if line.startswith("VmHWM:") or line.startswith("VmRSS:"):
-                        val = int(line.split()[1])
-                        if val > peak_rss_kb:
-                            peak_rss_kb = val
-            except Exception:
-                pass
-        time.sleep(0.005)
+        peak_rss_kb = 0
+        status_file = Path(f"/proc/{proc.pid}/status")
+        deadline = t_start + timeout
+        timed_out = False
+        while proc.poll() is None:
+            if status_file.exists():
+                try:
+                    for line in status_file.read_text().splitlines():
+                        if line.startswith("VmHWM:") or line.startswith("VmRSS:"):
+                            val = int(line.split()[1])
+                            if val > peak_rss_kb:
+                                peak_rss_kb = val
+                except Exception:
+                    pass
+            if time.perf_counter() > deadline:
+                timed_out = True
+                proc.kill()
+                break
+            time.sleep(0.005)
+        proc.wait()
 
-    stdout, stderr = proc.communicate()
     duration = time.perf_counter() - t_start
 
     # Fallback to rusage if /proc wasn't readable (e.g. macOS)
@@ -626,7 +744,10 @@ def measure_binary_execution(bin_path, args, cwd):
         else:
             peak_rss_kb = ru.ru_maxrss
 
-    status = "PASSED" if proc.returncode == 0 else f"ERROR({proc.returncode})"
+    if timed_out:
+        status = f"TIMEOUT(>{timeout}s)"
+    else:
+        status = "PASSED" if proc.returncode == 0 else f"ERROR({proc.returncode})"
     rss_mb = f"{peak_rss_kb / 1024.0:.1f} MB" if peak_rss_kb > 0 else "3.2 MB"
 
     return {
@@ -636,42 +757,86 @@ def measure_binary_execution(bin_path, args, cwd):
         "loc": loc
     }
 
+def _ensure_battery(dirpath, names, timeout=180):
+    """Pick the side's canonical unit-battery binary, rebuilding it when missing
+    or older than the newest source file in that tree.
+
+    Returns (path_or_None, note_or_None). `make <test-target>` compiles ONLY the
+    battery -- the Makefile's test rule depends on the test sources, never on the
+    `almaz` binary -- so this never touches the deployed A/B slot.
+    """
+    try:
+        srcs = list(dirpath.glob("*.c")) + list(dirpath.glob("*.h"))
+        newest_src = max([f.stat().st_mtime for f in srcs] or [0.0])
+    except Exception:
+        newest_src = 0.0
+
+    for name in names:
+        cand = dirpath / name
+        if cand.exists() and cand.stat().st_mtime >= newest_src:
+            return cand, None
+
+    target = names[0]
+    try:
+        r = subprocess.run(["make", "-s", target], cwd=dirpath, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+        cand = dirpath / target
+        if r.returncode == 0 and cand.exists():
+            return cand, None
+        return None, f"make {target} failed (rc={r.returncode})"
+    except Exception as e:
+        return None, f"make {target} error: {type(e).__name__}"
+
+
 def run_arena_benchmark():
-    """Runs genuine algorithmic execution comparison between Core Belya and Almaz."""
+    """Head-to-head comparison on an IDENTICAL artifact class and arg set.
+
+    Champion = the Belya tree, Challenger = the Almaz tree. Both sides run the
+    verification battery when BOTH batteries are present; otherwise both sides
+    fall back to startup (`--help`) and the run is flagged DEGRADED. The two
+    sides are never compared across different artifact classes.
+    """
     print("\n--- PHASE 3: HEAD-TO-HEAD ARENA BENCHMARK ---")
-    belya_bin = Path("/opt/belya/belya")
-    almaz_bin = WORKSPACE_DIR / "almaz"
+    belya_dir = Path("/opt/belya")
+    if not (belya_dir / "belya").exists():
+        belya_dir = WORKSPACE_DIR
+    almaz_dir = WORKSPACE_DIR
 
-    # Fallback paths for local or relative testing
-    if not belya_bin.exists():
-        belya_bin = WORKSPACE_DIR / "belya"
-    if not almaz_bin.exists():
-        almaz_bin = WORKSPACE_DIR / "belya"
+    # Per-side canonical battery names (Almaz builds `almaz_test`, Belya `belya_test`).
+    belya_test, belya_note = _ensure_battery(belya_dir, ["belya_test", "almaz_test"])
+    almaz_test, almaz_note = _ensure_battery(almaz_dir, ["almaz_test", "belya_test"])
 
-    belya_test = belya_bin.parent / "belya_test"
-    almaz_test = WORKSPACE_DIR / "almaz_test"
-    if not almaz_test.exists():
-        almaz_test = WORKSPACE_DIR / "belya_test"
-
-    print(f"[*] Running Champion:  {belya_test if belya_test.exists() else belya_bin}")
-    if belya_test.exists():
-        bench_belya = measure_binary_execution(belya_test, [], cwd=belya_bin.parent)
+    if belya_test and almaz_test:
+        mode = "verification battery (like-for-like)"
+        belya_target, belya_args = belya_test, []
+        almaz_target, almaz_args = almaz_test, []
     else:
-        bench_belya = measure_binary_execution(belya_bin, ["--help"], cwd=belya_bin.parent)
+        notes = ", ".join(str(n) for n in (belya_note, almaz_note) if n)
+        mode = f"startup-only (DEGRADED: {notes or 'test battery unavailable'})"
+        belya_target, belya_args = belya_dir / "belya", ["--help"]
+        almaz_target, almaz_args = almaz_dir / "almaz", ["--help"]
 
-    print(f"[*] Running Challenger:{almaz_test if almaz_test.exists() else almaz_bin}")
-    if almaz_test.exists():
-        bench_almaz = measure_binary_execution(almaz_test, [], cwd=almaz_bin.parent)
-    else:
-        bench_almaz = measure_binary_execution(almaz_bin, ["--help"], cwd=almaz_bin.parent)
+    print(f"[*] Arena mode: {mode}")
+    print(f"[*] Running Champion:  {belya_target}")
+    bench_belya = measure_binary_execution(belya_target, belya_args, cwd=belya_dir)
+
+    print(f"[*] Running Challenger:{almaz_target}")
+    bench_almaz = measure_binary_execution(almaz_target, almaz_args, cwd=almaz_dir)
+
+    b_d = bench_belya.get("duration", 0.0)
+    a_d = bench_almaz.get("duration", 0.0)
+    ratio = round(a_d / b_d, 3) if b_d > 0 else None
 
     results = {
         "belya": bench_belya,
-        "almaz": bench_almaz
+        "almaz": bench_almaz,
+        "mode": mode,
+        "ratio": ratio
     }
 
     print(f"[+] Champion (Core Belya): {results['belya']}")
     print(f"[+] Challenger (Almaz):    {results['almaz']}")
+    print(f"[+] Ratio (Almaz/Belya):   {ratio}x")
     return results
 
 # =========================================================================
@@ -765,6 +930,141 @@ def update_self_model_from_evolution(evo_result, arena_result):
 # =========================================================================
 # Phase 5: Dispatch Telegram Scorecard
 # =========================================================================
+ARENA_HISTORY = REPORTS_DIR / "arena_history.jsonl"
+ARENA_REGRESSION_PCT = 15.0          # alert when a metric worsens vs the median
+
+
+def _deploy_meta_fields():
+    """Read the provenance file written by deploy_meta.sh (plan M0.4)."""
+    out = {}
+    try:
+        for line in (WORKSPACE_DIR / ".deploy_meta").read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return out
+
+
+def append_arena_history(arena_result):
+    """M4.1: append one record per night so the scorecard can show a real trend.
+
+    Before this, the scorecard printed bare numbers (0.113s vs 13.894s) with no
+    history, which is why a phantom 123x "regression" went unnoticed for weeks.
+    """
+    meta = _deploy_meta_fields()
+    b = arena_result.get("belya", {})
+    a = arena_result.get("almaz", {})
+    rec = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mode": arena_result.get("mode"),
+        "ratio": arena_result.get("ratio"),
+        "belya_duration": b.get("duration"),
+        "almaz_duration": a.get("duration"),
+        "belya_rss": b.get("rss"),
+        "almaz_rss": a.get("rss"),
+        "almaz_loc": a.get("loc"),
+        "deploy_seq": meta.get("DEPLOY_SEQ"),
+        "active_sha": (meta.get("ACTIVE_SHA") or "")[:12],
+        "lkg_sha": (meta.get("LKG_SHA") or "")[:12],
+        "selfest_active": meta.get("SELFEST_ACTIVE"),
+        "selfest_lkg": meta.get("SELFEST_LKG"),
+    }
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        with open(ARENA_HISTORY, "a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        print(f"[+] Arena history appended ({rec['ratio']}x, deploy_seq {rec['deploy_seq']})")
+    except Exception as e:
+        print(f"[!] Arena history append failed: {e}")
+    return rec
+
+
+def _median(vals):
+    vs = sorted(v for v in vals if isinstance(v, (int, float)))
+    if not vs:
+        return None
+    n = len(vs)
+    return vs[n // 2] if n % 2 else (vs[n // 2 - 1] + vs[n // 2]) / 2.0
+
+
+def arena_trend(window=7):
+    """M4.1: 7-night median + delta, and regression alerts past ARENA_REGRESSION_PCT.
+
+    Returns (scorecard_lines, alerts).
+    """
+    rows = []
+    try:
+        for line in ARENA_HISTORY.read_text().splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+    except Exception:
+        rows = []
+    if len(rows) < 2:
+        return [f"• Trend: need >=2 nights of history (have {len(rows)})"], []
+
+    hist = rows[:-1][-window:]      # prior nights only; rows[-1] is tonight
+    tonight = rows[-1]
+    lines, alerts = [], []
+    for key, label in (("almaz_duration", "Almaz duration"), ("belya_duration", "Belya duration")):
+        med = _median([r.get(key) for r in hist])
+        cur = tonight.get(key)
+        if med and cur:
+            delta = (cur - med) / med * 100.0
+            arrow = "▲" if delta > 0 else ("▼" if delta < 0 else "=")
+            lines.append(f"• {label}: {cur:.3f}s vs {len(hist)}-night median {med:.3f}s ({arrow}{abs(delta):.1f}%)")
+            if delta > ARENA_REGRESSION_PCT:
+                alerts.append(f"{label} {delta:+.1f}% vs median")
+    rmed = _median([r.get("ratio") for r in hist])
+    if rmed and tonight.get("ratio"):
+        lines.append(f"• Ratio: {tonight['ratio']}x vs {len(hist)}-night median {rmed}x")
+    return lines, alerts
+
+
+def collect_status_block():
+    """M4.3: guardian health, immutability, provenance and spend for the scorecard."""
+    meta = _deploy_meta_fields()
+    lines = [
+        f"• ACTIVE sha `{(meta.get('ACTIVE_SHA') or '?')[:12]}` | LKG sha `{(meta.get('LKG_SHA') or '?')[:12]}` | DEPLOY_SEQ {meta.get('DEPLOY_SEQ', '?')}",
+        f"• Selfest: ACTIVE={meta.get('SELFEST_ACTIVE', '?')} LKG={meta.get('SELFEST_LKG', '?')}",
+    ]
+    try:
+        r = subprocess.run(["systemctl", "show", "almaz-guardian.timer", "-p", "LastTriggerUSec", "--value"],
+                           capture_output=True, text=True, timeout=10)
+        last = r.stdout.strip() or "unknown"
+    except Exception:
+        last = "unknown"
+    try:
+        r = subprocess.run(["lsattr", str(WORKSPACE_DIR / "almaz-watchdog")],
+                           capture_output=True, text=True, timeout=10)
+        flags = r.stdout.split()[0] if r.stdout.split() else ""
+        immutable = "yes" if "i" in flags else "NO"
+    except Exception:
+        immutable = "unknown"
+    lines.append(f"• Guardian last run: {last} | watchdog immutable: {immutable}")
+    try:
+        mh = REPORTS_DIR / "mutation_history.json"
+        last_mut = datetime.fromtimestamp(mh.stat().st_mtime, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if mh.exists() else "none"
+    except Exception:
+        last_mut = "unknown"
+    spend = 0
+    try:
+        sp = REPORTS_DIR / "evolution_spend.jsonl"
+        if sp.exists():
+            for line in sp.read_text().splitlines():
+                if line.strip():
+                    spend += float(json.loads(line).get("tokens", 0) or 0)
+    except Exception:
+        pass
+    lines.append(f"• Last mutation record: {last_mut} | generator spend to date: {int(spend)} tokens")
+    return lines
+
+
 def dispatch_daily_report(findings, evo_result, arena_result, healing_status, env):
     """Formats and sends the authentic executive markdown scorecard to Telegram."""
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -772,6 +1072,12 @@ def dispatch_daily_report(findings, evo_result, arena_result, healing_status, en
 
     commit_line = f"`{commit_sha}`" if commit_sha else "No commit (clean)"
     patch_line = f"`{patch_path}`" if patch_path else "None"
+
+    # M4.1 / M4.3: trend vs history, regression alert, resilience + provenance block
+    trend_lines, trend_alerts = arena_trend()
+    trend_block = "\n".join(trend_lines)
+    status_block = "\n".join(collect_status_block())
+    alert_block = ("\n⚠️ *REGRESSION ALERT:* " + "; ".join(trend_alerts)) if trend_alerts else ""
 
     scorecard = (
         f"⚔️ *ALMAZ SOVEREIGN ORGANISM ARENA SCORECARD*\n"
@@ -793,9 +1099,13 @@ def dispatch_daily_report(findings, evo_result, arena_result, healing_status, en
         f"🩺 *3. Observability-Driven Self-Healing*\n"
         f"• State: {healing_status}\n\n"
         f"🏆 *4. Real Champion vs. Challenger Arena*\n"
-        f"• Challenge: Full 37-Module Verification Battery\n"
+        f"• Challenge: {arena_result.get('mode', 'verification battery')} | ratio (Almaz/Belya): {arena_result.get('ratio', 'n/a')}x\n"
         f"• *Core Belya (Champion):* {arena_result['belya']['status']} | {arena_result['belya']['duration']}s | RSS: {arena_result['belya']['rss']} | {arena_result['belya']['loc']} LOC\n"
-        f"• *Almaz (Challenger):*   {arena_result['almaz']['status']} | {arena_result['almaz']['duration']}s | RSS: {arena_result['almaz']['rss']} | {arena_result['almaz']['loc']} LOC\n\n"
+        f"• *Almaz (Challenger):*   {arena_result['almaz']['status']} | {arena_result['almaz']['duration']}s | RSS: {arena_result['almaz']['rss']} | {arena_result['almaz']['loc']} LOC\n"
+        f"{trend_block}\n"
+        f"{alert_block}\n\n"
+        f"🛠️ *5. Resilience & Provenance (M0/M4)*\n"
+        f"{status_block}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 *System Status:* Core Belya pristine. Almaz empirical organism evolution complete."
     )
@@ -849,6 +1159,7 @@ def main():
 
     evo_result = run_self_evolution(force_retest=args.force_retest)
     arena_result = run_arena_benchmark()
+    append_arena_history(arena_result)          # M4.1: record before rendering the trend
     healing_status = run_self_healing_analysis()
     update_self_model_from_evolution(evo_result, arena_result)
     dispatch_daily_report(findings, evo_result, arena_result, healing_status, env)

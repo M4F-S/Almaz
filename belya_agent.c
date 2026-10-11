@@ -5,6 +5,7 @@
 #define _GNU_SOURCE 1
 #endif
 
+#include "common.h"
 #include "belya_agent.h"
 #include "minifrontmatter.h"
 #include <time.h>
@@ -13,6 +14,15 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
+
+/* R4 (2026-10-10): single source of truth for success rate, 0.0-1.0 ratio of
+   tool successes to tool calls. Callers scale for display as needed. */
+static double almaz_success_rate(const BelyaAgent *a) {
+    size_t calls = a ? a->lifetime_tool_calls : 0;
+    if (calls == 0) return 1.0;
+    return (double)a->lifetime_successes / (double)calls;
+}
+
 
 double belya_get_current_rss_mb(void) {
     struct rusage ru;
@@ -64,6 +74,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     agent->turns_since_save = 0;
     agent->confidence = 0.70f;
     agent->frustration = 0.00f;
+    agent->recent_form = 1.00f;   /* M2.1/R6(a): start in form */
+    agent->recent_form_samples = 0;
     agent->lifetime_turns = 0;
     agent->lifetime_successes = 0;
     agent->lifetime_failures = 0;
@@ -87,6 +99,9 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
     if (sqlite3_open(db_path, &agent->db) == SQLITE_OK) {
         // Enable WAL mode for better concurrent read performance
         sqlite3_exec(agent->db, "PRAGMA journal_mode=WAL;", 0, 0, 0);
+        /* R5 (2026-10-10): writers share one DB; without a busy timeout
+           SQLITE_BUSY silently drops writes. */
+        sqlite3_busy_timeout(agent->db, 5000);
 
         const char *schema_sql = 
             "CREATE TABLE IF NOT EXISTS agent_memory ("
@@ -192,6 +207,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
                         double frust_val = json_obj_get_num(jv, "frustration", -1.0);
                         if (conf_val >= 0.0) agent->confidence = (float)conf_val;
                         if (frust_val >= 0.0) agent->frustration = (float)frust_val;
+                        double rf_val = json_obj_get_num(jv, "recent_form", -1.0);
+                        if (rf_val >= 0.0) agent->recent_form = (float)rf_val;
                         json_free(jv);
                     }
                 }
@@ -320,8 +337,8 @@ void belya_agent_register_schema(BelyaAgent *agent, const char *name, const char
     }
     agent->schemas = new_schemas;
     BelyaToolSchema *s = &agent->schemas[agent->schema_count - 1];
-    s->name = strdup(name);
-    s->description = strdup(desc);
+    s->name = xstrdup(name);
+    s->description = xstrdup(desc);
     s->parameters_schema = params;
 }
 
@@ -337,8 +354,8 @@ void belya_agent_add_message(BelyaAgent *agent, const char *role, const char *co
     }
     BelyaMessage *m = &agent->messages[agent->msg_count++];
     memset(m, 0, sizeof(BelyaMessage));
-    m->role = strdup(role);
-    m->content = strdup(content ? content : "");
+    m->role = xstrdup(role);
+    m->content = xstrdup(content ? content : "");
 }
 
 void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, const char *name, const char *result) {
@@ -354,8 +371,8 @@ void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, co
     }
     BelyaMessage *m = &agent->messages[agent->msg_count++];
     memset(m, 0, sizeof(BelyaMessage));
-    m->role = strdup("tool");
-    m->tool_call_id = strdup(tool_call_id ? tool_call_id : "call_default");
+    m->role = xstrdup("tool");
+    m->tool_call_id = xstrdup(tool_call_id ? tool_call_id : "call_default");
     const char *limit_env = getenv("TOOL_OUTPUT_LIMIT");
     size_t limit_bytes = (limit_env && atoi(limit_env) > 500) ? (size_t)atoi(limit_env) : 8000;
 
@@ -376,7 +393,7 @@ void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, co
         dyn_str_append_len(&ds, result + (total_len - tail_len), tail_len);
         m->content = ds.data;
     } else {
-        m->content = strdup(result ? result : "");
+        m->content = xstrdup(result ? result : "");
     }
 }
 
@@ -393,13 +410,13 @@ void belya_agent_log_timeline(BelyaAgent *agent, const char *event_type, const c
 }
 
 char *belya_agent_get_timeline(BelyaAgent *agent, int limit) {
-    if (!agent || !agent->db) return strdup("Timeline database not active.");
+    if (!agent || !agent->db) return xstrdup("Timeline database not active.");
     if (limit <= 0) limit = 15;
 
     sqlite3_stmt *stmt;
     const char *sql = "SELECT event_type, summary, created_at FROM agent_timeline ORDER BY id DESC LIMIT ?;";
     if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        return strdup("Failed to query agent timeline.");
+        return xstrdup("Failed to query agent timeline.");
     }
 
     sqlite3_bind_int(stmt, 1, limit);
@@ -490,7 +507,7 @@ void belya_agent_persist_memory(BelyaAgent *agent, const char *topic, const char
 }
 
 static char *sanitize_fts5_query(const char *raw) {
-    if (!raw) return strdup("");
+    if (!raw) return xstrdup("");
     DynString ds = dyn_str_new();
     for (size_t i = 0; raw[i]; i++) {
         char c = raw[i];
@@ -504,7 +521,7 @@ static char *sanitize_fts5_query(const char *raw) {
 }
 
 char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
-    if (!agent->db) return strdup("Memory database not active.");
+    if (!agent->db) return xstrdup("Memory database not active.");
     DynString out = dyn_str_new();
 
     if (agent->has_fts5 && query && strlen(query) > 0) {
@@ -599,9 +616,20 @@ void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent) {
         free_single_message(&agent->messages[i]);
     }
 
-    size_t remaining = keep_recent;
+    /* H4: never begin history on an orphaned tool message (its assistant
+       parent was dropped). Providers reject such sequences with HTTP 400,
+       which used to wedge the daemon permanently. */
+    size_t start = 1 + drop_count;
+    while (start < agent->msg_count &&
+           agent->messages[start].role &&
+           strcmp(agent->messages[start].role, "tool") == 0) {
+        free_single_message(&agent->messages[start]);
+        start++;
+    }
+
+    size_t remaining = agent->msg_count - start;
     for (size_t i = 0; i < remaining; i++) {
-        agent->messages[1 + i] = agent->messages[1 + drop_count + i];
+        agent->messages[1 + i] = agent->messages[start + i];
     }
     agent->msg_count = 1 + remaining;
 }
@@ -647,6 +675,10 @@ size_t belya_agent_total_tokens(const BelyaAgent *agent) {
 
 bool belya_agent_save_session(BelyaAgent *agent, const char *session_id, const char *title) {
     if (!agent || !agent->db || !session_id || strlen(session_id) == 0) return false;
+
+    /* H5: batch the delete + all inserts in ONE transaction so a save does
+       not write N WAL frames with N autocommits (the 1.3GB WAL root cause). */
+    sqlite3_exec(agent->db, "BEGIN IMMEDIATE;", 0, 0, 0);
 
     // Upsert session metadata
     sqlite3_stmt *stmt;
@@ -698,6 +730,8 @@ bool belya_agent_save_session(BelyaAgent *agent, const char *session_id, const c
             if (tc_json) free(tc_json);
         }
     }
+
+    sqlite3_exec(agent->db, "COMMIT;", 0, 0, 0);
 
     char save_summary[256];
     snprintf(save_summary, sizeof(save_summary), "Session '%s' saved (%zu messages)", session_id, agent->msg_count);
@@ -758,9 +792,9 @@ bool belya_agent_load_session(BelyaAgent *agent, const char *session_id) {
 
         BelyaMessage *m = &loaded[count++];
         memset(m, 0, sizeof(BelyaMessage));
-        m->role = strdup(role ? role : "user");
-        m->content = strdup(content ? content : "");
-        if (t_id && strlen(t_id) > 0) m->tool_call_id = strdup(t_id);
+        m->role = xstrdup(role ? role : "user");
+        m->content = xstrdup(content ? content : "");
+        if (t_id && strlen(t_id) > 0) m->tool_call_id = xstrdup(t_id);
 
         if (tc_json && strlen(tc_json) > 0) {
             JsonValue *tc_arr = json_parse(tc_json);
@@ -773,9 +807,9 @@ bool belya_agent_load_session(BelyaAgent *agent, const char *session_id) {
                         const char *tid = json_obj_get_str(tc_o, "id");
                         const char *tname = json_obj_get_str(tc_o, "name");
                         const char *targs = json_obj_get_str(tc_o, "arguments");
-                        m->tool_calls[k].id = strdup(tid ? tid : "");
-                        m->tool_calls[k].name = strdup(tname ? tname : "");
-                        m->tool_calls[k].arguments_json = strdup(targs ? targs : "{}");
+                        m->tool_calls[k].id = xstrdup(tid ? tid : "");
+                        m->tool_calls[k].name = xstrdup(tname ? tname : "");
+                        m->tool_calls[k].arguments_json = xstrdup(targs ? targs : "{}");
                     }
                 } else {
                     m->tool_call_count = 0;
@@ -809,14 +843,14 @@ bool belya_agent_load_session(BelyaAgent *agent, const char *session_id) {
 }
 
 char *belya_agent_list_sessions(BelyaAgent *agent) {
-    if (!agent || !agent->db) return strdup("Session store not active.");
+    if (!agent || !agent->db) return xstrdup("Session store not active.");
 
     sqlite3_stmt *stmt;
     const char *sql = "SELECT s.id, s.title, s.model, s.updated_at, COUNT(m.id) "
                       "FROM sessions s LEFT JOIN session_messages m ON s.id = m.session_id "
                       "GROUP BY s.id ORDER BY s.updated_at DESC LIMIT 15;";
     if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        return strdup("Failed to query sessions table.");
+        return xstrdup("Failed to query sessions table.");
     }
 
     DynString ds = dyn_str_new();
@@ -841,7 +875,7 @@ char *belya_agent_list_sessions(BelyaAgent *agent) {
 
 char *belya_agent_reflect_and_distill(BelyaAgent *agent) {
     if (!agent || agent->msg_count <= 2) {
-        return strdup("Not enough conversation turns to distill a reusable skill.");
+        return xstrdup("Not enough conversation turns to distill a reusable skill.");
     }
 
     DynString skill = dyn_str_new();
@@ -861,7 +895,7 @@ char *belya_agent_reflect_and_distill(BelyaAgent *agent) {
 
     if (tool_uses == 0) {
         dyn_str_free(&skill);
-        return strdup("No tool actions detected in recent turns to distill.");
+        return xstrdup("No tool actions detected in recent turns to distill.");
     }
 
     char topic[128];
@@ -1073,7 +1107,7 @@ size_t belya_agent_load_rule_packs(BelyaAgent *agent, const char *rules_dir, Dyn
 }
 
 char *belya_agent_search_skills(BelyaAgent *agent, const char *query) {
-    if (!agent || !agent->db) return strdup("Memory database not active.");
+    if (!agent || !agent->db) return xstrdup("Memory database not active.");
     DynString ds = dyn_str_new();
     sqlite3_stmt *stmt;
     const char *sql = "SELECT topic, room, content, salience, access_count FROM agent_memory "
@@ -1156,7 +1190,7 @@ char *belya_agent_match_skill_for_prompt(BelyaAgent *agent, const char *user_pro
 
         bool matches = false;
         if (trig && strlen(trig) > 0) {
-            char *trig_copy = strdup(trig);
+            char *trig_copy = xstrdup(trig);
             if (trig_copy) {
                 char *token_ctx = NULL;
                 char *tok = strtok_r(trig_copy, ",;", &token_ctx);
@@ -1181,7 +1215,7 @@ char *belya_agent_match_skill_for_prompt(BelyaAgent *agent, const char *user_pro
         }
 
         if (matches && content) {
-            matched_content = strdup(content);
+            matched_content = xstrdup(content);
             // Boost salience and access count
             sqlite3_stmt *up_stmt;
             const char *up_sql = "UPDATE agent_memory SET access_count = access_count + 1, "
@@ -1348,12 +1382,12 @@ BelyaAgentManifest *belya_agent_get_manifest(BelyaAgent *agent, const char *name
     int c_turns = sqlite3_column_int(stmt, 4);
     const char *c_inst = (const char *)sqlite3_column_text(stmt, 5);
 
-    m->name = strdup(c_name ? c_name : "");
-    m->role = strdup(c_role ? c_role : "");
-    m->tools = strdup(c_tools ? c_tools : "");
-    m->model = strdup(c_model ? c_model : "inherit");
+    m->name = xstrdup(c_name ? c_name : "");
+    m->role = xstrdup(c_role ? c_role : "");
+    m->tools = xstrdup(c_tools ? c_tools : "");
+    m->model = xstrdup(c_model ? c_model : "inherit");
     m->max_turns = c_turns > 0 ? c_turns : 5;
-    m->instructions = strdup(c_inst ? c_inst : "");
+    m->instructions = xstrdup(c_inst ? c_inst : "");
 
     if (!m->name || !m->role || !m->tools || !m->model || !m->instructions) {
         belya_agent_manifest_free(m);
@@ -1550,11 +1584,11 @@ bool belya_agent_rollback_to_checkpoint(BelyaAgent *agent, const char *checkpoin
 }
 
 char *belya_agent_list_checkpoints(BelyaAgent *agent) {
-    if (!agent || !agent->db) return strdup("Checkpoint store not active.");
+    if (!agent || !agent->db) return xstrdup("Checkpoint store not active.");
     sqlite3_stmt *stmt;
     const char *sql = "SELECT id, label, git_tree_sha, turn_id, msg_count, created_at FROM agent_checkpoints ORDER BY id DESC LIMIT 15;";
     if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) != SQLITE_OK) {
-        return strdup("Failed to query checkpoints table.");
+        return xstrdup("Failed to query checkpoints table.");
     }
 
     DynString ds = dyn_str_new();
@@ -1661,8 +1695,8 @@ bool belya_agent_export_trajectory(BelyaAgent *agent, const char *session_id, co
 }
 
 char *belya_agent_search_conversations(BelyaAgent *agent, const char *query) {
-    if (!agent || !agent->db) return strdup("Database not available for conversation history search.");
-    if (!query || strlen(query) == 0) return strdup("Error: Missing query string for conversation search.");
+    if (!agent || !agent->db) return xstrdup("Database not available for conversation history search.");
+    if (!query || strlen(query) == 0) return xstrdup("Error: Missing query string for conversation search.");
 
     DynString out = dyn_str_new();
     sqlite3_stmt *stmt;
@@ -1703,6 +1737,8 @@ char *belya_agent_search_conversations(BelyaAgent *agent, const char *query) {
 }
 
 ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
+    /* M2.1/R6(a): one decay step per turn so a stale bad streak fades. */
+    almaz_agent_recent_form_decay(agent);
     // Auto-save: save before compaction drops messages, and on turn interval
     if (agent->auto_save_interval > 0 && agent->db) {
         bool should_save = false;
@@ -1904,7 +1940,7 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
         size_t total_tools = agent->lifetime_tool_calls;
-        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+        double success_rate = almaz_success_rate(agent) * 100.0;   /* R4: unified */
 
         dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
         dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
@@ -1932,6 +1968,18 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
             total_tools);
         if (agent->frustration >= 0.60f) {
             dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
+        }
+        /* M2.1/R6(a): escalation driven by the MEASURED metric, so these tiers
+           are actually reachable (the self-reported frustration is pinned). */
+        {
+            float distress = almaz_agent_distress(agent);
+            if (distress >= 0.80f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING (SEVERE): measured recent form %.2f over %zu observations. STOP the multi-step plan, report your current state, and request guidance before continuing.\n", (double)agent->recent_form, agent->recent_form_samples);
+            } else if (distress >= 0.60f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: measured recent form %.2f. Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->recent_form);
+            } else if (distress >= 0.35f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE NOTICE: measured recent form %.2f. Shrink scope and VERIFY with a read/check step before any further speculative edit.\n", (double)agent->recent_form);
+            }
         }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
@@ -2041,16 +2089,16 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
     }
     BelyaMessage *ast_msg = &agent->messages[agent->msg_count++];
     memset(ast_msg, 0, sizeof(BelyaMessage));
-    ast_msg->role = strdup("assistant");
-    ast_msg->content = strdup(resp.content ? resp.content : "");
+    ast_msg->role = xstrdup("assistant");
+    ast_msg->content = xstrdup(resp.content ? resp.content : "");
     if (resp.has_tool_call) {
         ast_msg->tool_call_count = resp.tool_call_count;
         ast_msg->tool_calls = calloc(resp.tool_call_count, sizeof(ModelParsedToolCall));
         if (ast_msg->tool_calls) {
             for (size_t i = 0; i < resp.tool_call_count; i++) {
-                ast_msg->tool_calls[i].id = strdup(resp.tool_calls[i].id ? resp.tool_calls[i].id : "");
-                ast_msg->tool_calls[i].name = strdup(resp.tool_calls[i].name ? resp.tool_calls[i].name : "");
-                ast_msg->tool_calls[i].arguments_json = strdup(resp.tool_calls[i].arguments_json ? resp.tool_calls[i].arguments_json : "{}");
+                ast_msg->tool_calls[i].id = xstrdup(resp.tool_calls[i].id ? resp.tool_calls[i].id : "");
+                ast_msg->tool_calls[i].name = xstrdup(resp.tool_calls[i].name ? resp.tool_calls[i].name : "");
+                ast_msg->tool_calls[i].arguments_json = xstrdup(resp.tool_calls[i].arguments_json ? resp.tool_calls[i].arguments_json : "{}");
             }
         } else {
             ast_msg->tool_call_count = 0;
@@ -2066,6 +2114,8 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
 }
 
 ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char *instruction) {
+    /* M2.1/R6(a): symmetric decay on the forced-text path. */
+    almaz_agent_recent_form_decay(agent);
     if (instruction && strlen(instruction) > 0) {
         belya_agent_add_message(agent, "user", instruction);
     }
@@ -2122,7 +2172,7 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
         size_t max_tok = agent->max_context_tokens > 0 ? agent->max_context_tokens : 128000;
         double tok_pct = ((double)est_tok / (double)max_tok) * 100.0;
         size_t total_tools = agent->lifetime_tool_calls;
-        double success_rate = total_tools > 0 ? ((double)agent->lifetime_successes / (double)total_tools) * 100.0 : 100.0;
+        double success_rate = almaz_success_rate(agent) * 100.0;   /* R4: unified */
 
         dyn_str_append(&telem_ds, "=== Almaz Internal Self-Telemetry & Proprioception ===\n");
         dyn_str_appendf(&telem_ds, "PID: %d | Host: %s | Active RSS: %.2f MB | Turn: %zu (Lifetime: %zu) | Context: ~%zu / %zu tokens (%.1f%%) | Registered Tools: %zu\n",
@@ -2151,6 +2201,18 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
         if (agent->frustration >= 0.60f) {
             dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: High cognitive frustration detected (%.2f). Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->frustration);
         }
+        /* M2.1/R6(a): escalation driven by the MEASURED metric, so these tiers
+           are actually reachable (the self-reported frustration is pinned). */
+        {
+            float distress = almaz_agent_distress(agent);
+            if (distress >= 0.80f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING (SEVERE): measured recent form %.2f over %zu observations. STOP the multi-step plan, report your current state, and request guidance before continuing.\n", (double)agent->recent_form, agent->recent_form_samples);
+            } else if (distress >= 0.60f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE WARNING: measured recent form %.2f. Pause speculative multi-step operations and verify baseline facts before proceeding.\n", (double)agent->recent_form);
+            } else if (distress >= 0.35f) {
+                dyn_str_appendf(&telem_ds, "AFFECTIVE NOTICE: measured recent form %.2f. Shrink scope and VERIFY with a read/check step before any further speculative edit.\n", (double)agent->recent_form);
+            }
+        }
         dyn_str_append(&telem_ds, "Operational Rule: Monitor your turn budget and memory footprint. Verify changes before concluding.");
         json_obj_add(telem_msg, "content", json_create_string(telem_ds.data));
         dyn_str_free(&telem_ds);
@@ -2178,8 +2240,8 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
     }
     BelyaMessage *ast_msg = &agent->messages[agent->msg_count++];
     memset(ast_msg, 0, sizeof(BelyaMessage));
-    ast_msg->role = strdup("assistant");
-    ast_msg->content = strdup(resp.content ? resp.content : "");
+    ast_msg->role = xstrdup("assistant");
+    ast_msg->content = xstrdup(resp.content ? resp.content : "");
 
     agent->turn_count++;
     agent->turns_since_save++;
@@ -2213,7 +2275,7 @@ char *almaz_agent_get_self_model(BelyaAgent *agent) {
         dyn_str_appendf(&ds, "Self-Model (v%d):\n- Capabilities: %s\n- Weaknesses: %s\n- Performance: %s\n- Appraisal: confidence=%.2f, frustration=%.2f",
                         version, cap ? cap : "N/A", weak ? weak : "N/A", stats ? stats : "N/A",
                         agent->confidence, agent->frustration);
-        result = strdup(ds.data);
+        result = xstrdup(ds.data);
         dyn_str_free(&ds);
     }
     sqlite3_finalize(stmt);
@@ -2231,10 +2293,20 @@ bool almaz_agent_update_self_model(BelyaAgent *agent, const char *capabilities, 
         }
         sqlite3_finalize(stmt);
     }
-    sqlite3_exec(agent->db, "UPDATE self_model SET active = 0 WHERE active = 1;", 0, 0, 0);
+    /* R3 (2026-10-10): self-heal + transactional update. An interruption
+       between the UPDATE and the INSERT used to leave ZERO active rows. */
+    sqlite3_exec(agent->db,
+        "UPDATE self_model SET active = 1 WHERE version = (SELECT MAX(version) FROM self_model) "
+        "AND NOT EXISTS (SELECT 1 FROM self_model WHERE active = 1);", 0, 0, 0);
+    if (sqlite3_exec(agent->db, "BEGIN IMMEDIATE;", 0, 0, 0) != SQLITE_OK) return false;
+    if (sqlite3_exec(agent->db, "UPDATE self_model SET active = 0 WHERE active = 1;", 0, 0, 0) != SQLITE_OK) {
+        sqlite3_exec(agent->db, "ROLLBACK;", 0, 0, 0);
+        return false;
+    }
 
     const char *ins = "INSERT INTO self_model (version, capabilities, weaknesses, performance_stats, active) VALUES (?, ?, ?, ?, 1);";
     if (sqlite3_prepare_v2(agent->db, ins, -1, &stmt, NULL) != SQLITE_OK) {
+        sqlite3_exec(agent->db, "ROLLBACK;", 0, 0, 0);
         return false;
     }
     sqlite3_bind_int(stmt, 1, next_version);
@@ -2243,6 +2315,7 @@ bool almaz_agent_update_self_model(BelyaAgent *agent, const char *capabilities, 
     sqlite3_bind_text(stmt, 4, performance_stats ? performance_stats : "{}", -1, SQLITE_STATIC);
     bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
     sqlite3_finalize(stmt);
+    sqlite3_exec(agent->db, ok ? "COMMIT;" : "ROLLBACK;", 0, 0, 0);
     return ok;
 }
 
@@ -2250,34 +2323,39 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
     if (!agent || !agent->db) return false;
 
     size_t total = agent->lifetime_turns;
-    double success_rate = total > 0 ? ((double)agent->lifetime_successes / (double)total) : 1.0;
+    double success_rate = almaz_success_rate(agent);   /* R4: unified (was successes/turns) */
     double rss_mb = belya_get_current_rss_mb();
 
-    char stats_json[512];
+    char stats_json[768];
     snprintf(stats_json, sizeof(stats_json),
-             "{\"turns\": %zu, \"successes\": %zu, \"failures\": %zu, \"success_rate\": %.3f, \"tool_calls\": %zu, \"rss_mb\": %.2f, \"confidence\": %.2f, \"frustration\": %.2f}",
+             "{\"turns\": %zu, \"successes\": %zu, \"failures\": %zu, \"success_rate\": %.3f, \"tool_calls\": %zu, \"rss_mb\": %.2f, \"confidence\": %.2f, \"frustration\": %.2f, \"recent_form\": %.3f, \"recent_form_samples\": %zu}",
              total, agent->lifetime_successes, agent->lifetime_failures, success_rate,
-             agent->lifetime_tool_calls, rss_mb, (double)agent->confidence, (double)agent->frustration);
+             agent->lifetime_tool_calls, rss_mb, (double)agent->confidence, (double)agent->frustration,
+             (double)agent->recent_form, agent->recent_form_samples);
 
     char *curr_cap = NULL;
     char *curr_weak = NULL;
     sqlite3_stmt *stmt = NULL;
+    /* R3 self-heal (read path): guarantee at least one active row. */
+    sqlite3_exec(agent->db,
+        "UPDATE self_model SET active = 1 WHERE version = (SELECT MAX(version) FROM self_model) "
+        "AND NOT EXISTS (SELECT 1 FROM self_model WHERE active = 1);", 0, 0, 0);
     const char *q = "SELECT capabilities, weaknesses FROM self_model WHERE active = 1 ORDER BY id DESC LIMIT 1;";
     if (sqlite3_prepare_v2(agent->db, q, -1, &stmt, NULL) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) {
             const char *c = (const char *)sqlite3_column_text(stmt, 0);
             const char *w = (const char *)sqlite3_column_text(stmt, 1);
-            if (c) curr_cap = strdup(c);
-            if (w) curr_weak = strdup(w);
+            if (c) curr_cap = xstrdup(c);
+            if (w) curr_weak = xstrdup(w);
         }
         sqlite3_finalize(stmt);
     }
 
     if (!curr_cap) {
-        curr_cap = strdup("[\"pure C99 systems programming\", \"zero memory leak compliance\", \"POSIX shell operations\", \"deterministic code verification\"]");
+        curr_cap = xstrdup("[\"pure C99 systems programming\", \"zero memory leak compliance\", \"POSIX shell operations\", \"deterministic code verification\"]");
     }
     if (!curr_weak) {
-        curr_weak = strdup("[\"unbounded speculative edits without read_file\", \"deep conversational drift\"]");
+        curr_weak = xstrdup("[\"unbounded speculative edits without read_file\", \"deep conversational drift\"]");
     }
 
     /* M5: update the ACTIVE row's performance_stats in place instead of
@@ -2300,9 +2378,47 @@ bool almaz_agent_sync_self_model(BelyaAgent *agent) {
     return res;
 }
 
+/* ---- M2.1 / R6(a): measured recent form ------------------------------------
+   EWMA over real, non-self-reported outcomes. 1.0 = fully in form, 0.0 = badly
+   out of form. Kept apart from confidence/frustration so the asserted clamping
+   spec is untouched; `almaz_agent_distress()` is what the gates read. */
+#define ALMAZ_RECENT_FORM_ALPHA   0.25f   /* weight of the newest observation */
+#define ALMAZ_RECENT_FORM_NEUTRAL 0.75f   /* drift target when nothing happens */
+#define ALMAZ_RECENT_FORM_DECAY   0.02f   /* per-turn pull toward neutral */
+
+static float almaz_clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+void almaz_agent_recent_form_observe(BelyaAgent *agent, float observation) {
+    if (!agent) return;
+    float o = almaz_clampf(observation, 0.0f, 1.0f);
+    agent->recent_form = almaz_clampf(
+        (1.0f - ALMAZ_RECENT_FORM_ALPHA) * agent->recent_form + ALMAZ_RECENT_FORM_ALPHA * o,
+        0.0f, 1.0f);
+    agent->recent_form_samples++;
+}
+
+/* With no new evidence the metric drifts back toward neutral, so a bad streak
+   from an hour ago cannot pin the agent in a degraded state forever. */
+void almaz_agent_recent_form_decay(BelyaAgent *agent) {
+    if (!agent) return;
+    agent->recent_form = almaz_clampf(
+        agent->recent_form + ALMAZ_RECENT_FORM_DECAY * (ALMAZ_RECENT_FORM_NEUTRAL - agent->recent_form),
+        0.0f, 1.0f);
+}
+
+/* 0.0 = in form, 1.0 = badly out of form. */
+float almaz_agent_distress(const BelyaAgent *agent) {
+    if (!agent) return 0.0f;
+    return almaz_clampf(1.0f - agent->recent_form, 0.0f, 1.0f);
+}
+
 void almaz_agent_record_appraisal(BelyaAgent *agent, bool success) {
     if (!agent) return;
     agent->lifetime_tool_calls++;
+    /* M2.1/R6(a): fold the real outcome into the measured metric. */
+    almaz_agent_recent_form_observe(agent, success ? 1.0f : 0.0f);
     if (success) {
         agent->lifetime_successes++;
         agent->confidence = (agent->confidence + 0.05f > 1.0f) ? 1.0f : (agent->confidence + 0.05f);

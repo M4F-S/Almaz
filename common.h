@@ -5,8 +5,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <ctype.h>
+
+/* R1 (2026-10-10): fail-fast strdup. NULL-in -> NULL-out; OOM -> log + abort.
+   A supervised daemon must never dereference a NULL returned by a failed dup. */
+static inline char *xstrdup(const char *s) {
+    if (!s) return NULL;
+    size_t _n = strlen(s) + 1;
+    char *_p = malloc(_n);
+    if (!_p) { fprintf(stderr, "[xstrdup] FATAL: out of memory (%zu bytes)\n", _n); abort(); }
+    memcpy(_p, s, _n);
+    return _p;
+}
 
 typedef struct {
     char *data;
@@ -19,7 +31,13 @@ static inline DynString dyn_str_new(void) {
     ds.cap = 1024;
     ds.len = 0;
     ds.data = malloc(ds.cap);
-    if (ds.data) ds.data[0] = '\0';
+    if (ds.data) {
+        ds.data[0] = '\0';
+    } else {
+        /* H1: on allocation failure, cap must be 0 so dyn_str_grow()
+           reallocs instead of memcpy-ing into NULL. */
+        ds.cap = 0;
+    }
     return ds;
 }
 
@@ -27,6 +45,10 @@ static inline void dyn_str_grow(DynString *ds, size_t needed) {
     if (ds->len + needed + 1 > ds->cap) {
         size_t new_cap = ds->cap ? ds->cap : 512;
         while (ds->len + needed + 1 > new_cap) {
+            if (new_cap > SIZE_MAX / 2) {
+                new_cap = ds->len + needed + 1;
+                break;
+            }
             new_cap *= 2;
         }
         char *new_data = realloc(ds->data, new_cap);

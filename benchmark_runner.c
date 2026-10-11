@@ -1,5 +1,6 @@
 #define _DARWIN_C_SOURCE 1
 #define _POSIX_C_SOURCE 200809L
+#include "common.h"
 #include "belya_harness.h"
 #include "telegram_adapter.h"
 #include <stdio.h>
@@ -53,11 +54,11 @@ static ModelGatewayResponse benchmark_parse_model_json(const char *json_src) {
         JsonValue *message = json_obj_get(choice, "message");
         if (message) {
             const char *content_str = json_obj_get_str(message, "content");
-            if (content_str) res.content = strdup(content_str);
+            if (content_str) res.content = xstrdup(content_str);
 
             const char *reasoning = json_obj_get_str(message, "reasoning_content");
             if (!reasoning) reasoning = json_obj_get_str(message, "thinking");
-            if (reasoning) res.reasoning_content = strdup(reasoning);
+            if (reasoning) res.reasoning_content = xstrdup(reasoning);
 
             // 1. Standard OpenAI tool_calls
             JsonValue *tc_arr = json_obj_get(message, "tool_calls");
@@ -73,9 +74,9 @@ static ModelGatewayResponse benchmark_parse_model_json(const char *json_src) {
                         const char *f_name = fn ? json_obj_get_str(fn, "name") : "unknown";
                         const char *f_args = fn ? json_obj_get_str(fn, "arguments") : "{}";
 
-                        res.tool_calls[i].id = strdup(t_id ? t_id : "call_default");
-                        res.tool_calls[i].name = strdup(f_name ? f_name : "");
-                        res.tool_calls[i].arguments_json = strdup(f_args ? f_args : "{}");
+                        res.tool_calls[i].id = xstrdup(t_id ? t_id : "call_default");
+                        res.tool_calls[i].name = xstrdup(f_name ? f_name : "");
+                        res.tool_calls[i].arguments_json = xstrdup(f_args ? f_args : "{}");
                     }
                 } else {
                     res.tool_call_count = 0;

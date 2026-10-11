@@ -1,3 +1,4 @@
+#include "common.h"
 #include "model_adapter.h"
 #include <curl/curl.h>
 #include <unistd.h>
@@ -105,9 +106,9 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                     const char *t_id = json_obj_get_str(tc_item, "id");
                     if (t_id) {
                         if (ctx->tool_calls[idx].id) free(ctx->tool_calls[idx].id);
-                        ctx->tool_calls[idx].id = strdup(t_id);
+                        ctx->tool_calls[idx].id = xstrdup(t_id);
                     } else if (!ctx->tool_calls[idx].id) {
-                        ctx->tool_calls[idx].id = strdup("call_default");
+                        ctx->tool_calls[idx].id = xstrdup("call_default");
                     }
 
                     JsonValue *fn = json_obj_get(tc_item, "function");
@@ -115,7 +116,7 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                         const char *f_name = json_obj_get_str(fn, "name");
                         if (f_name) {
                             if (!ctx->tool_calls[idx].name) {
-                                ctx->tool_calls[idx].name = strdup(f_name);
+                                ctx->tool_calls[idx].name = xstrdup(f_name);
                             } else {
                                 size_t old_nlen = strlen(ctx->tool_calls[idx].name);
                                 size_t add_nlen = strlen(f_name);
@@ -131,7 +132,7 @@ static void stream_process_line(StreamContext *ctx, const char *line) {
                         const char *f_args = json_obj_get_str(fn, "arguments");
                         if (f_args) {
                             if (!ctx->tool_calls[idx].arguments_json) {
-                                ctx->tool_calls[idx].arguments_json = strdup(f_args);
+                                ctx->tool_calls[idx].arguments_json = xstrdup(f_args);
                             } else {
                                 size_t old_alen = strlen(ctx->tool_calls[idx].arguments_json);
                                 size_t add_alen = strlen(f_args);
@@ -179,14 +180,18 @@ static size_t curl_sink_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     return total;
 }
 
-static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
+static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema, bool use_fallback) {
     ModelGatewayResponse res = {0};
 
+    const char *ep = (use_fallback && self->fallback_endpoint) ? self->fallback_endpoint : self->endpoint;
+    const char *key = (use_fallback && self->fallback_api_key) ? self->fallback_api_key : self->api_key;
+    const char *mod = (use_fallback && self->fallback_model) ? self->fallback_model : self->model;
+
     JsonValue *payload = json_create_object();
-    json_obj_add(payload, "model", json_create_string(self->model));
+    json_obj_add(payload, "model", json_create_string(mod ? mod : "hermes-3"));
     json_obj_add(payload, "messages", (JsonValue *)messages_json); // Shared reference
     if (tools_schema && tools_schema->type == JSON_ARRAY && tools_schema->u.array.count > 0) {
-        if (!self->model || strstr(self->model, "deepseek-r1") == NULL) {
+        if (!mod || strstr(mod, "deepseek-r1") == NULL) {
             json_obj_add(payload, "tools", (JsonValue *)tools_schema);
             json_obj_add(payload, "tool_choice", json_create_string("auto"));
         }
@@ -220,7 +225,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         }
         CURL *curl = (CURL *)self->curl_handle;
         if (!curl) {
-            res.content = strdup("System Error: Failed to initialize libcurl.");
+            res.content = xstrdup("System Error: Failed to initialize libcurl.");
             free(json_body);
             return res;
         }
@@ -232,24 +237,24 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
         char auth_header[512];
-        if (self->api_key && strlen(self->api_key) > 0 && strcmp(self->api_key, "none") != 0) {
-            snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", self->api_key);
+        if (key && strlen(key) > 0 && strcmp(key, "none") != 0) {
+            snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", key);
             headers = curl_slist_append(headers, auth_header);
         }
 
         if (self->prompt_caching) {
             // Only send anthropic prompt caching header for anthropic endpoints
-            if (self->endpoint && strstr(self->endpoint, "anthropic") != NULL) {
+            if (ep && strstr(ep, "anthropic") != NULL) {
                 headers = curl_slist_append(headers, "anthropic-beta: prompt-caching-2024-07-31");
             }
         }
 
-        if (self->endpoint && strstr(self->endpoint, "openrouter.ai") != NULL) {
+        if (ep && strstr(ep, "openrouter.ai") != NULL) {
             headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/M4F-S/Almaz");
             headers = curl_slist_append(headers, "X-Title: Almaz Organism");
         }
 
-        if (self->endpoint && strstr(self->endpoint, "opencode.ai") != NULL) {
+        if (ep && strstr(ep, "opencode.ai") != NULL) {
             const char *oc_sess = getenv("OPENCODE_SESSION_ID");
             char sess_hdr[256];
             snprintf(sess_hdr, sizeof(sess_hdr), "x-opencode-session: %s", (oc_sess && strlen(oc_sess) > 0) ? oc_sess : "almaz-organism-session");
@@ -257,7 +262,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         }
 
         long timeout = self->timeout_sec > 0 ? (long)self->timeout_sec : 60L;
-        curl_easy_setopt(curl, CURLOPT_URL, self->endpoint);
+        curl_easy_setopt(curl, CURLOPT_URL, ep);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
@@ -352,8 +357,8 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
 
             // Ensure non-null name and args on tool calls
             for (size_t k = 0; k < stream_ctx.tool_call_count; k++) {
-                if (!stream_ctx.tool_calls[k].name) stream_ctx.tool_calls[k].name = strdup("");
-                if (!stream_ctx.tool_calls[k].arguments_json) stream_ctx.tool_calls[k].arguments_json = strdup("{}");
+                if (!stream_ctx.tool_calls[k].name) stream_ctx.tool_calls[k].name = xstrdup("");
+                if (!stream_ctx.tool_calls[k].arguments_json) stream_ctx.tool_calls[k].arguments_json = xstrdup("{}");
             }
 
             res.content = stream_ctx.accum_content.len > 0 ? stream_ctx.accum_content.data : NULL;
@@ -367,7 +372,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
 
             if (!res.content && !res.has_tool_call) {
                 if (res.reasoning_content && strlen(res.reasoning_content) > 0) {
-                    res.content = strdup(res.reasoning_content);
+                    res.content = xstrdup(res.reasoning_content);
                 } else {
                     // If stream was empty, check if raw_fallback was an error json
                     JsonValue *err_root = json_parse(stream_ctx.raw_fallback.data);
@@ -397,7 +402,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         JsonValue *root = json_parse(non_stream_body.data);
         dyn_str_free(&non_stream_body);
         if (!root) {
-            res.content = strdup("Error: Failed to parse upstream model JSON response.");
+            res.content = xstrdup("Error: Failed to parse upstream model JSON response.");
             free(json_body);
             return res;
         }
@@ -429,13 +434,13 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
             JsonValue *message = json_obj_get(choice, "message");
             if (message) {
                 const char *content_str = json_obj_get_str(message, "content");
-                if (content_str && strlen(content_str) > 0) res.content = strdup(content_str);
+                if (content_str && strlen(content_str) > 0) res.content = xstrdup(content_str);
 
                 const char *reasoning = json_obj_get_str(message, "reasoning_content");
                 if (!reasoning) reasoning = json_obj_get_str(message, "thinking");
                 if (!reasoning) reasoning = json_obj_get_str(message, "reasoning");
                 if (reasoning && strlen(reasoning) > 0) {
-                    res.reasoning_content = strdup(reasoning);
+                    res.reasoning_content = xstrdup(reasoning);
                 }
 
                 JsonValue *tc_arr = json_obj_get(message, "tool_calls");
@@ -454,9 +459,9 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
                             const char *f_name = fn ? json_obj_get_str(fn, "name") : "unknown";
                             const char *f_args = fn ? json_obj_get_str(fn, "arguments") : "{}";
 
-                            res.tool_calls[i].id = strdup(t_id ? t_id : "call_default");
-                            res.tool_calls[i].name = strdup(f_name ? f_name : "");
-                            res.tool_calls[i].arguments_json = strdup(f_args ? f_args : "{}");
+                            res.tool_calls[i].id = xstrdup(t_id ? t_id : "call_default");
+                            res.tool_calls[i].name = xstrdup(f_name ? f_name : "");
+                            res.tool_calls[i].arguments_json = xstrdup(f_args ? f_args : "{}");
                         }
                     }
                 }
@@ -466,7 +471,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         if ((!res.content || strlen(res.content) == 0) && !res.has_tool_call) {
             if (res.reasoning_content && strlen(res.reasoning_content) > 0) {
                 if (res.content) free(res.content);
-                res.content = strdup(res.reasoning_content);
+                res.content = xstrdup(res.reasoning_content);
             } else {
                 if (res.content) free(res.content);
                 DynString empty_ds = dyn_str_new();
@@ -481,17 +486,33 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
     }
 
     free(json_body);
-    res.content = strdup("Error: Maximum retry attempts exceeded.");
+    res.content = xstrdup("Error: Maximum retry attempts exceeded.");
     return res;
 }
 
 /* Gateway wrapper: tracks consecutive_failures for the health watcher and
  * enforces the daily budget circuit breaker (Week-4). Success = tool call
  * present OR content that is not an error/empty message. */
+/* R7 (2026-10-11): provider-failover support. A "hard failure" is anything the
+   caller would surface as an error: no tool call AND an empty or error-prefixed
+   body. */
+static bool gateway_response_is_hard_failure(const ModelGatewayResponse *r) {
+    if (!r) return true;
+    if (r->has_tool_call) return false;
+    if (!r->content || r->content[0] == '\0') return true;
+    return strncmp(r->content, "Error:", 6) == 0 ||
+           strncmp(r->content, "API Error", 9) == 0 ||
+           strncmp(r->content, "Network Error", 13) == 0 ||
+           strncmp(r->content, "Empty model response", 20) == 0 ||
+           strncmp(r->content, "Empty response from stream", 26) == 0 ||
+           strncmp(r->content, "Connection Error", 16) == 0;
+}
+
+
 static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
     if (!self) {
         ModelGatewayResponse r = {0};
-        r.content = strdup("Error: gateway not initialized.");
+        r.content = xstrdup("Error: gateway not initialized.");
         return r;
     }
 
@@ -503,14 +524,26 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
         snprintf(msg, sizeof(msg),
                  "BudgetExceeded: daily budget sealed (%ld tokens, %ld calls). Resumes at UTC midnight.",
                  self->budget_state.tokens_used, self->budget_state.calls);
-        r.content = strdup(msg);
+        r.content = xstrdup(msg);
         return r;
     }
     self->budget_tripped = false; /* stale from a previous day */
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema);
+    ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema, false);
+
+    /* R7 (2026-10-11): provider-failover support. */
+    if (self->fallback_endpoint && self->fallback_api_key && strlen(self->fallback_api_key) > 0 &&
+        gateway_response_is_hard_failure(&res)) {
+        fprintf(stderr, "\033[1;33m[ModelGateway Failover]: Primary endpoint '%s' failed (%s) -> failing over to '%s' (%s)...\033[0m\n",
+                self->endpoint ? self->endpoint : "unknown",
+                res.content ? res.content : "unknown",
+                self->fallback_endpoint,
+                self->fallback_model ? self->fallback_model : "");
+        model_gateway_response_free(&res);
+        res = openai_chat_complete_inner(self, messages_json, tools_schema, true);
+    }
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long duration_sec = (long)(t1.tv_sec - t0.tv_sec);
 
@@ -587,12 +620,12 @@ static void try_add_scavenged_call(const char *json_str, const char *const *know
             char *args_json = NULL;
             if (args_val) {
                 if (args_val->type == JSON_STRING) {
-                    args_json = strdup(args_val->u.string);
+                    args_json = xstrdup(args_val->u.string);
                 } else {
                     args_json = json_serialize(args_val);
                 }
             } else {
-                args_json = strdup("{}");
+                args_json = xstrdup("{}");
             }
 
             if (*count >= *cap) {
@@ -608,9 +641,9 @@ static void try_add_scavenged_call(const char *json_str, const char *const *know
 
             char id_buf[64];
             snprintf(id_buf, sizeof(id_buf), "scavenged_%zu", *count + 1);
-            (*out_calls)[*count].id = strdup(id_buf);
-            (*out_calls)[*count].name = strdup(tname);
-            (*out_calls)[*count].arguments_json = args_json ? args_json : strdup("{}");
+            (*out_calls)[*count].id = xstrdup(id_buf);
+            (*out_calls)[*count].name = xstrdup(tname);
+            (*out_calls)[*count].arguments_json = args_json ? args_json : xstrdup("{}");
             (*count)++;
         }
     }
@@ -688,9 +721,9 @@ static void scavenge_dsml_tool_calls(const char *src, const char *const *known_t
             }
             char id_buf[64];
             snprintf(id_buf, sizeof(id_buf), "dsml_%zu", *count + 1);
-            (*out_calls)[*count].id = strdup(id_buf);
-            (*out_calls)[*count].name = strdup(tname);
-            (*out_calls)[*count].arguments_json = args_json ? args_json : strdup("{}");
+            (*out_calls)[*count].id = xstrdup(id_buf);
+            (*out_calls)[*count].name = xstrdup(tname);
+            (*out_calls)[*count].arguments_json = args_json ? args_json : xstrdup("{}");
             (*count)++;
         }
         json_free(args_obj);
@@ -767,11 +800,11 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     if (!endpoint) return NULL;
     ModelGateway *gw = calloc(1, sizeof(ModelGateway));
     if (!gw) return NULL;
-    gw->endpoint = strdup(endpoint);
-    gw->api_key = strdup(api_key ? api_key : "");
-    gw->model = strdup(model ? model : "hermes-3");
+    gw->endpoint = xstrdup(endpoint);
+    gw->api_key = xstrdup(api_key ? api_key : "");
+    gw->model = xstrdup(model ? model : "hermes-3");
     const char *ua_env = getenv("MODEL_USER_AGENT");
-    gw->user_agent = strdup(ua_env && strlen(ua_env) > 0 ? ua_env : "BelyaAgent/4.0 (Autonomous C99 Engine)");
+    gw->user_agent = xstrdup(ua_env && strlen(ua_env) > 0 ? ua_env : "BelyaAgent/4.0 (Autonomous C99 Engine)");
     if (!gw->endpoint || !gw->api_key || !gw->model || !gw->user_agent) {
         if (gw->endpoint) free(gw->endpoint);
         if (gw->api_key) free(gw->api_key);
@@ -782,6 +815,22 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     }
     gw->timeout_sec = 120;
     gw->max_retries = 3;
+    /* R7: optional automatic provider failover, env-configured. */
+    {
+        const char *fb_ep = getenv("MODEL_FALLBACK_ENDPOINT");
+        if (!fb_ep || !fb_ep[0]) fb_ep = getenv("FALLBACK_MODEL_ENDPOINT");
+        const char *fb_key = getenv("OPENROUTER_API_KEY");
+        if (!fb_key || !fb_key[0]) fb_key = getenv("FALLBACK_MODEL_API_KEY");
+        const char *fb_name = getenv("MODEL_FALLBACK_NAME");
+        if (!fb_name || !fb_name[0]) fb_name = getenv("FALLBACK_MODEL_NAME");
+
+        if (fb_ep && fb_ep[0]) {
+            model_gateway_set_fallback(gw, fb_ep, fb_key ? fb_key : "", fb_name ? fb_name : gw->model);
+        } else if (fb_key && fb_key[0]) {
+            model_gateway_set_fallback(gw, "https://openrouter.ai/api/v1/chat/completions", fb_key,
+                                       fb_name ? fb_name : "anthropic/claude-3.5-haiku");
+        }
+    }
     gw->streaming = true;
     budget_limits_from_env(&gw->budget_limits);
     const char *bp = getenv("BUDGET_PATH");
@@ -797,8 +846,20 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     if (pc_env && (strcmp(pc_env, "true") == 0 || strcmp(pc_env, "1") == 0)) {
         gw->prompt_caching = true;
     }
+
     gw->chat_complete = openai_chat_complete;
     return gw;
+}
+
+void model_gateway_set_fallback(ModelGateway *gw, const char *endpoint, const char *api_key, const char *model) {
+    if (!gw) return;
+    if (gw->fallback_endpoint) free(gw->fallback_endpoint);
+    if (gw->fallback_api_key) free(gw->fallback_api_key);
+    if (gw->fallback_model) free(gw->fallback_model);
+
+    gw->fallback_endpoint = (endpoint && endpoint[0]) ? xstrdup(endpoint) : NULL;
+    gw->fallback_api_key = (api_key && api_key[0]) ? xstrdup(api_key) : NULL;
+    gw->fallback_model = (model && model[0]) ? xstrdup(model) : NULL;
 }
 
 void model_gateway_free(ModelGateway *gw) {
@@ -808,6 +869,9 @@ void model_gateway_free(ModelGateway *gw) {
         gw->curl_handle = NULL;
     }
     free(gw->endpoint);
+    if (gw->fallback_endpoint) free(gw->fallback_endpoint);
+    if (gw->fallback_api_key) free(gw->fallback_api_key);
+    if (gw->fallback_model) free(gw->fallback_model);
     free(gw->api_key);
     free(gw->model);
     free(gw->user_agent);
