@@ -616,9 +616,20 @@ void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent) {
         free_single_message(&agent->messages[i]);
     }
 
-    size_t remaining = keep_recent;
+    /* H4: never begin history on an orphaned tool message (its assistant
+       parent was dropped). Providers reject such sequences with HTTP 400,
+       which used to wedge the daemon permanently. */
+    size_t start = 1 + drop_count;
+    while (start < agent->msg_count &&
+           agent->messages[start].role &&
+           strcmp(agent->messages[start].role, "tool") == 0) {
+        free_single_message(&agent->messages[start]);
+        start++;
+    }
+
+    size_t remaining = agent->msg_count - start;
     for (size_t i = 0; i < remaining; i++) {
-        agent->messages[1 + i] = agent->messages[1 + drop_count + i];
+        agent->messages[1 + i] = agent->messages[start + i];
     }
     agent->msg_count = 1 + remaining;
 }
@@ -664,6 +675,10 @@ size_t belya_agent_total_tokens(const BelyaAgent *agent) {
 
 bool belya_agent_save_session(BelyaAgent *agent, const char *session_id, const char *title) {
     if (!agent || !agent->db || !session_id || strlen(session_id) == 0) return false;
+
+    /* H5: batch the delete + all inserts in ONE transaction so a save does
+       not write N WAL frames with N autocommits (the 1.3GB WAL root cause). */
+    sqlite3_exec(agent->db, "BEGIN IMMEDIATE;", 0, 0, 0);
 
     // Upsert session metadata
     sqlite3_stmt *stmt;
@@ -715,6 +730,8 @@ bool belya_agent_save_session(BelyaAgent *agent, const char *session_id, const c
             if (tc_json) free(tc_json);
         }
     }
+
+    sqlite3_exec(agent->db, "COMMIT;", 0, 0, 0);
 
     char save_summary[256];
     snprintf(save_summary, sizeof(save_summary), "Session '%s' saved (%zu messages)", session_id, agent->msg_count);

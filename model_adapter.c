@@ -180,14 +180,18 @@ static size_t curl_sink_cb(void *ptr, size_t size, size_t nmemb, void *userdata)
     return total;
 }
 
-static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
+static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema, bool use_fallback) {
     ModelGatewayResponse res = {0};
 
+    const char *ep = (use_fallback && self->fallback_endpoint) ? self->fallback_endpoint : self->endpoint;
+    const char *key = (use_fallback && self->fallback_api_key) ? self->fallback_api_key : self->api_key;
+    const char *mod = (use_fallback && self->fallback_model) ? self->fallback_model : self->model;
+
     JsonValue *payload = json_create_object();
-    json_obj_add(payload, "model", json_create_string(self->model));
+    json_obj_add(payload, "model", json_create_string(mod ? mod : "hermes-3"));
     json_obj_add(payload, "messages", (JsonValue *)messages_json); // Shared reference
     if (tools_schema && tools_schema->type == JSON_ARRAY && tools_schema->u.array.count > 0) {
-        if (!self->model || strstr(self->model, "deepseek-r1") == NULL) {
+        if (!mod || strstr(mod, "deepseek-r1") == NULL) {
             json_obj_add(payload, "tools", (JsonValue *)tools_schema);
             json_obj_add(payload, "tool_choice", json_create_string("auto"));
         }
@@ -233,24 +237,24 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         headers = curl_slist_append(headers, "Content-Type: application/json");
 
         char auth_header[512];
-        if (self->api_key && strlen(self->api_key) > 0 && strcmp(self->api_key, "none") != 0) {
-            snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", self->api_key);
+        if (key && strlen(key) > 0 && strcmp(key, "none") != 0) {
+            snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", key);
             headers = curl_slist_append(headers, auth_header);
         }
 
         if (self->prompt_caching) {
             // Only send anthropic prompt caching header for anthropic endpoints
-            if (self->endpoint && strstr(self->endpoint, "anthropic") != NULL) {
+            if (ep && strstr(ep, "anthropic") != NULL) {
                 headers = curl_slist_append(headers, "anthropic-beta: prompt-caching-2024-07-31");
             }
         }
 
-        if (self->endpoint && strstr(self->endpoint, "openrouter.ai") != NULL) {
+        if (ep && strstr(ep, "openrouter.ai") != NULL) {
             headers = curl_slist_append(headers, "HTTP-Referer: https://github.com/M4F-S/Almaz");
             headers = curl_slist_append(headers, "X-Title: Almaz Organism");
         }
 
-        if (self->endpoint && strstr(self->endpoint, "opencode.ai") != NULL) {
+        if (ep && strstr(ep, "opencode.ai") != NULL) {
             const char *oc_sess = getenv("OPENCODE_SESSION_ID");
             char sess_hdr[256];
             snprintf(sess_hdr, sizeof(sess_hdr), "x-opencode-session: %s", (oc_sess && strlen(oc_sess) > 0) ? oc_sess : "almaz-organism-session");
@@ -258,7 +262,7 @@ static ModelGatewayResponse openai_chat_complete_inner(ModelGateway *self, const
         }
 
         long timeout = self->timeout_sec > 0 ? (long)self->timeout_sec : 60L;
-        curl_easy_setopt(curl, CURLOPT_URL, self->endpoint);
+        curl_easy_setopt(curl, CURLOPT_URL, ep);
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body);
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
@@ -504,21 +508,6 @@ static bool gateway_response_is_hard_failure(const ModelGatewayResponse *r) {
            strncmp(r->content, "Connection Error", 16) == 0;
 }
 
-/* Release a response before the failover attempt overwrites it. */
-static void gateway_response_clear(ModelGatewayResponse *r) {
-    if (!r) return;
-    if (r->content) { free(r->content); r->content = NULL; }
-    if (r->reasoning_content) { free(r->reasoning_content); r->reasoning_content = NULL; }
-    for (size_t k = 0; k < r->tool_call_count; k++) {
-        if (r->tool_calls[k].id) free(r->tool_calls[k].id);
-        if (r->tool_calls[k].name) free(r->tool_calls[k].name);
-        if (r->tool_calls[k].arguments_json) free(r->tool_calls[k].arguments_json);
-    }
-    if (r->tool_calls) { free(r->tool_calls); r->tool_calls = NULL; }
-    r->tool_call_count = 0;
-    r->has_tool_call = false;
-    r->prompt_tokens = r->completion_tokens = r->cached_tokens = 0;
-}
 
 static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonValue *messages_json, const JsonValue *tools_schema) {
     if (!self) {
@@ -542,30 +531,19 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
 
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema);
+    ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema, false);
 
-    /* R7 (2026-10-11): the inner function retries the SAME endpoint only, so a
-       primary-provider outage used to mean total loss of service (OpenRouter was
-       reachable only via the interactive /openrouter command). */
-    if (self->fallback_endpoint && !self->fallback_active &&
+    /* R7 (2026-10-11): provider-failover support. */
+    if (self->fallback_endpoint && self->fallback_api_key && strlen(self->fallback_api_key) > 0 &&
         gateway_response_is_hard_failure(&res)) {
-        char *prev_endpoint = self->endpoint;
-        char *prev_key = self->api_key;
-        char *prev_model = self->model;
-        fprintf(stderr, "[gateway] primary provider failed (%s) -> failing over to %s\n",
-                res.content ? res.content : "unknown", self->fallback_endpoint);
-        self->endpoint = self->fallback_endpoint;
-        self->api_key = self->fallback_api_key;
-        self->model = self->fallback_model;
-        self->fallback_active = true;
-        gateway_response_clear(&res);
-        res = openai_chat_complete_inner(self, messages_json, tools_schema);
-        self->endpoint = prev_endpoint;
-        self->api_key = prev_key;
-        self->model = prev_model;
-        self->fallback_active = false;
+        fprintf(stderr, "\033[1;33m[ModelGateway Failover]: Primary endpoint '%s' failed (%s) -> failing over to '%s' (%s)...\033[0m\n",
+                self->endpoint ? self->endpoint : "unknown",
+                res.content ? res.content : "unknown",
+                self->fallback_endpoint,
+                self->fallback_model ? self->fallback_model : "");
+        model_gateway_response_free(&res);
+        res = openai_chat_complete_inner(self, messages_json, tools_schema, true);
     }
-
     clock_gettime(CLOCK_MONOTONIC, &t1);
     long duration_sec = (long)(t1.tv_sec - t0.tv_sec);
 
@@ -837,15 +815,20 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     }
     gw->timeout_sec = 120;
     gw->max_retries = 3;
-    /* R7: optional automatic provider failover, env-configured (never hardcoded). */
+    /* R7: optional automatic provider failover, env-configured. */
     {
         const char *fb_ep = getenv("MODEL_FALLBACK_ENDPOINT");
+        if (!fb_ep || !fb_ep[0]) fb_ep = getenv("FALLBACK_MODEL_ENDPOINT");
         const char *fb_key = getenv("OPENROUTER_API_KEY");
+        if (!fb_key || !fb_key[0]) fb_key = getenv("FALLBACK_MODEL_API_KEY");
         const char *fb_name = getenv("MODEL_FALLBACK_NAME");
+        if (!fb_name || !fb_name[0]) fb_name = getenv("FALLBACK_MODEL_NAME");
+
         if (fb_ep && fb_ep[0]) {
-            gw->fallback_endpoint = xstrdup(fb_ep);
-            gw->fallback_api_key = xstrdup(fb_key ? fb_key : "");
-            gw->fallback_model = xstrdup((fb_name && fb_name[0]) ? fb_name : gw->model);
+            model_gateway_set_fallback(gw, fb_ep, fb_key ? fb_key : "", fb_name ? fb_name : gw->model);
+        } else if (fb_key && fb_key[0]) {
+            model_gateway_set_fallback(gw, "https://openrouter.ai/api/v1/chat/completions", fb_key,
+                                       fb_name ? fb_name : "anthropic/claude-3.5-haiku");
         }
     }
     gw->streaming = true;
@@ -863,8 +846,20 @@ ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, cons
     if (pc_env && (strcmp(pc_env, "true") == 0 || strcmp(pc_env, "1") == 0)) {
         gw->prompt_caching = true;
     }
+
     gw->chat_complete = openai_chat_complete;
     return gw;
+}
+
+void model_gateway_set_fallback(ModelGateway *gw, const char *endpoint, const char *api_key, const char *model) {
+    if (!gw) return;
+    if (gw->fallback_endpoint) free(gw->fallback_endpoint);
+    if (gw->fallback_api_key) free(gw->fallback_api_key);
+    if (gw->fallback_model) free(gw->fallback_model);
+
+    gw->fallback_endpoint = (endpoint && endpoint[0]) ? xstrdup(endpoint) : NULL;
+    gw->fallback_api_key = (api_key && api_key[0]) ? xstrdup(api_key) : NULL;
+    gw->fallback_model = (model && model[0]) ? xstrdup(model) : NULL;
 }
 
 void model_gateway_free(ModelGateway *gw) {

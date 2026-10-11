@@ -354,6 +354,100 @@ def evaluate_novelty_gate(candidate_mut, history, workspace_dir=WORKSPACE_DIR):
 
     return True, "Novel phenotype verified", patch_sha256, sig_sha256
 
+ALLOWED_DYNAMIC_TARGETS = ["minijson.c", "minifrontmatter.c", "linenoise.c"]
+
+def generate_dynamic_llm_mutation(history, env):
+    """
+    Dynamically requests a novel, safe C99 micro-optimization candidate from the LLM
+    when static pool mutations are exhausted.
+    Strictly constrained to whitelist files, single hunk, JSON schema, and novelty gate.
+    """
+    print("[*] Generating dynamic LLM mutation candidate...")
+    api_key = env.get("MODEL_API_KEY") or env.get("OPENROUTER_API_KEY") or env.get("OPENCODE_API_KEY")
+    endpoint = env.get("MODEL_ENDPOINT") or "https://opencode.ai/zen/go/v1/chat/completions"
+    model = env.get("MODEL_NAME") or "opencode-go"
+
+    if not api_key:
+        print("[!] No API key available in env for dynamic mutation generator.")
+        return None
+
+    # Pick an allowed target file that exists in workspace
+    candidates_files = [f for f in ALLOWED_DYNAMIC_TARGETS if (WORKSPACE_DIR / f).exists()]
+    if not candidates_files:
+        return None
+
+    # Rotate target file based on history count
+    target_filename = candidates_files[len(history) % len(candidates_files)]
+    target_path = WORKSPACE_DIR / target_filename
+    target_code = target_path.read_text(errors="ignore")
+
+    # Select representative code slice (up to 150 lines)
+    sample_code = "\n".join(target_code.splitlines()[:150])
+
+    prompt = (
+        f"You are a principal C99 systems engineer specializing in zero-overhead micro-optimizations.\n"
+        f"Here is a snippet from '{target_filename}':\n"
+        f"```c\n{sample_code}\n```\n\n"
+        f"Propose a single safe, micro-optimizing mutation for '{target_filename}'.\n"
+        f"Rules:\n"
+        f"1. Target ONLY '{target_filename}'.\n"
+        f"2. 'old' must be an exact verbatim substring in '{target_filename}' (between 3 and 15 lines).\n"
+        f"3. 'new' must be the optimized replacement with identical semantics and zero memory leaks under ASan.\n"
+        f"4. Do NOT change public function prototypes or API contracts.\n"
+        f"5. Return strictly valid JSON with no markdown wrapping or explanation:\n"
+        f'{{"id": "dyn_{target_filename[:7]}_{int(time.time()) % 10000}", "name": "Dynamic optimization of {target_filename}", "target_file": "{target_filename}", "old": "...", "new": "...", "description": "..."}}'
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a C99 code optimizer. Output only raw JSON."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+
+    try:
+        req = urllib.request.Request(endpoint, data=json.dumps(payload).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                print(f"[!] Dynamic mutation API error: HTTP {resp.status}")
+                return None
+            res_json = json.loads(resp.read().decode("utf-8"))
+            content = res_json["choices"][0]["message"]["content"].strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1]
+                if content.endswith("```"):
+                    content = content.rsplit("```", 1)[0]
+                content = content.strip()
+
+            mut = json.loads(content)
+            if mut.get("target_file") not in ALLOWED_DYNAMIC_TARGETS:
+                print(f"[!] Dynamic mutation rejected: unauthorized target {mut.get('target_file')}")
+                return None
+            if not mut.get("old") or not mut.get("new") or not mut.get("id"):
+                print("[!] Dynamic mutation rejected: missing required keys")
+                return None
+            if mut["old"] not in target_code:
+                print(f"[!] Dynamic mutation rejected: 'old' snippet not found verbatim in {mut['target_file']}")
+                return None
+
+            is_novel, reason, _, _ = evaluate_novelty_gate(mut, history, WORKSPACE_DIR)
+            if not is_novel:
+                print(f"[!] Dynamic mutation gated out: {reason}")
+                return None
+
+            print(f"[+] Dynamic LLM Mutation Generated: {mut['name']} ({mut['id']})")
+            return mut
+    except Exception as e:
+        print(f"[!] Dynamic mutation generation failed: {e}")
+        return None
+
 def run_self_evolution(force_retest=False):
     """Runs sandbox mutation, ASan testing, Darwinian fitness scoring, patch export, and git commit."""
     print("\n--- PHASE 2: AUTONOMOUS METAMORPHIC SELF-EVOLUTION ---")
@@ -371,11 +465,6 @@ def run_self_evolution(force_retest=False):
             if m["old"] in content:
                 unapplied.append(m)
 
-    if not unapplied:
-        msg = f"All {len(MUTATION_POOL)} mutations from current pool already applied or baseline optimal."
-        print(f"[*] {msg}")
-        return False, msg, 0.0, None, None
-
     # 2. Darwinian Novelty Gate: Filter out previously failed phenotypes
     novel_candidates = []
     gated_out = []
@@ -390,14 +479,21 @@ def run_self_evolution(force_retest=False):
             gated_out.append((m, reason, p_hash))
             print(f"[!] Novelty Gated Out: {m['name']} -> {reason}")
 
+    # If static candidates are exhausted or all gated out, trigger dynamic LLM mutation generator
     if not novel_candidates:
-        msg = (
-            f"Darwinian Novelty Gate: All {len(unapplied)} unapplied candidate(s) were previously "
-            f"rejected failed phenotypes ({len(gated_out)} blocked by SHA-256 taboo filter). "
-            f"0 novel phenotypes available in pool."
-        )
-        print(f"[*] {msg}")
-        return False, msg, 0.0, None, None
+        print(f"[*] Darwinian Novelty Gate: Static candidates exhausted. Triggering Dynamic LLM Mutation Generator...")
+        env = load_env()
+        dyn_mut = generate_dynamic_llm_mutation(history, env)
+        if dyn_mut:
+            novel_candidates.append(dyn_mut)
+        else:
+            msg = (
+                f"Darwinian Novelty Gate: All {len(unapplied)} unapplied candidate(s) were previously "
+                f"rejected failed phenotypes ({len(gated_out)} blocked by SHA-256 taboo filter). "
+                f"Dynamic LLM generator produced 0 novel candidates."
+            )
+            print(f"[*] {msg}")
+            return False, msg, 0.0, None, None
 
     # Pick the mutation from novel_candidates that was tested least recently
     def sort_key(m):

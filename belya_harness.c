@@ -14,6 +14,9 @@
 #include <fnmatch.h>
 #include <strings.h>
 #include <regex.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <curl/curl.h>
 
 static BelyaHarness *g_harness = NULL;
@@ -342,11 +345,25 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     return out.data;
 }
 
+/* Secrets and operator state that file tools must never expose or mutate. */
+static bool is_secret_path(const char *path) {
+    if (!path || path[0] == '\0') return false;
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    if (strcmp(base, ".env") == 0) return true;
+    if (strcmp(base, "budget_state.txt") == 0) return true;
+    if (strcmp(base, ".deploy_state") == 0) return true;
+    return false;
+}
+
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write) {
     if (!path || path[0] == '\0') return false;
 
     // Reject paths with explicit directory traversal
     if (strstr(path, "..") != NULL) return false;
+
+    // Never expose or write secrets/operator state through file tools
+    if (is_secret_path(path)) return false;
 
     // Determine and canonicalize workspace root
     char root_buf[4096];
@@ -471,6 +488,12 @@ static char *tool_read_file(BelyaAgent *agent, const JsonValue *args) {
 
     double offset_num = json_obj_get_num(args, "offset", 0);
     double limit_num = json_obj_get_num(args, "limit", 0);
+
+    /* Clamp model-controlled line numbers before casting (M5: avoid UB). */
+    if (offset_num < 0) offset_num = 0;
+    if (limit_num < 0) limit_num = 0;
+    if (offset_num > 100000000) offset_num = 100000000;
+    if (limit_num > 1000000) limit_num = 1000000;
 
     FILE *f = fopen(path, "rb");
     if (!f) return xstrdup("Error: Target file not found or inaccessible.");
@@ -1472,6 +1495,49 @@ static size_t fetch_url_curl_sink(void *ptr, size_t size, size_t nmemb, void *us
     return total;
 }
 
+/* SSRF guard: reject loopback, link-local, and RFC1918/documented-private
+   destinations (including IPv4-mapped IPv6). Called per connection attempt. */
+static bool sockaddr_is_private(const struct sockaddr *sa) {
+    if (!sa) return false;
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
+        uint32_t a = ntohl(in->sin_addr.s_addr);
+        if ((a & 0xFF000000u) == 0x00000000u) return true;   /* 0.0.0.0/8 */
+        if ((a & 0xFF000000u) == 0x0A000000u) return true;   /* 10.0.0.0/8 */
+        if ((a & 0xFF000000u) == 0x7F000000u) return true;   /* 127.0.0.0/8 */
+        if ((a & 0xFFF00000u) == 0xAC100000u) return true;   /* 172.16.0.0/12 */
+        if ((a & 0xFFFF0000u) == 0xC0A80000u) return true;   /* 192.168.0.0/16 */
+        if ((a & 0xFFFF0000u) == 0xA9FE0000u) return true;   /* 169.254.0.0/16 */
+        return false;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)sa;
+        const uint8_t *b = in6->sin6_addr.s6_addr;
+        if (IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr)) return true;
+        if (IN6_IS_ADDR_LINKLOCAL(&in6->sin6_addr)) return true;
+        if (IN6_IS_ADDR_SITELOCAL(&in6->sin6_addr)) return true;
+        if ((b[0] & 0xFE) == 0xFC) return true;              /* fc00::/7 ULA */
+        if (IN6_IS_ADDR_V4MAPPED(&in6->sin6_addr)) {         /* ::ffff:a.b.c.d */
+            struct sockaddr_in v4;
+            memset(&v4, 0, sizeof(v4));
+            v4.sin_family = AF_INET;
+            memcpy(&v4.sin_addr, &in6->sin6_addr.s6_addr[12], 4);
+            return sockaddr_is_private((const struct sockaddr *)&v4);
+        }
+        return false;
+    }
+    return false;
+}
+
+static curl_socket_t fetch_url_opensocket_cb(void *clientp, curlsocktype purpose,
+                                             const struct sockaddr *addr, socklen_t addrlen) {
+    (void)clientp; (void)purpose; (void)addrlen;
+    if (addr && sockaddr_is_private(addr)) {
+        return CURL_SOCKET_BAD; /* refuse the connection */
+    }
+    return socket(addr ? addr->sa_family : AF_INET, SOCK_STREAM, 0);
+}
+
 static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *url = json_obj_get_str(args, "url");
@@ -1529,6 +1595,14 @@ static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+    /* C1: only http/https; block file://, gopher, etc. (and on redirects). */
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    /* C1: SSRF guard — refuse loopback/link-local/private destinations unless
+       the operator explicitly allows them via FETCH_ALLOW_PRIVATE=1. */
+    if (!getenv("FETCH_ALLOW_PRIVATE")) {
+        curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, fetch_url_opensocket_cb);
+    }
 
     CURLcode code = curl_easy_perform(curl);
     long http_code = 0;

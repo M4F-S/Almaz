@@ -32,11 +32,10 @@ typedef struct ModelGateway {
     char *api_key;
     char *model;
     char *user_agent; // HTTP User-Agent sent on every gateway request
-    /* R7 (2026-10-11): automatic provider failover (primary exhausted -> fallback). */
     char *fallback_endpoint;
     char *fallback_api_key;
     char *fallback_model;
-    bool fallback_active; /* true only while a request is running on the fallback */
+    bool fallback_active;
     int timeout_sec;
     int max_retries;
     int consecutive_failures; // health watcher counter: reset on success, ++ on failure
@@ -53,6 +52,7 @@ typedef struct ModelGateway {
 } ModelGateway;
 
 ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, const char *model);
+void model_gateway_set_fallback(ModelGateway *gw, const char *endpoint, const char *api_key, const char *model);
 void model_gateway_free(ModelGateway *gw);
 void model_gateway_response_free(ModelGatewayResponse *resp);
 
