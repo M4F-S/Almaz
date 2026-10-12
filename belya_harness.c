@@ -2120,6 +2120,8 @@ static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
 
     if (body.len == 0) {
         dyn_str_appendf(&body, "URL returned empty response (HTTP %ld).", http_code);
+    } else if (http_code >= 400) {
+        dyn_str_appendf(&body, "\n[HTTP Error Status: %ld]", http_code);
     }
 
     return body.data;
