@@ -846,7 +846,7 @@ size_t almaz_concept_fusion_sweep(BelyaAgent *agent) {
         return 0;
     }
 
-    char fused_topic[128];
+    char fused_topic[256];
     snprintf(fused_topic, sizeof(fused_topic), "Invariant Schema: %s/%s", cluster_wing, cluster_room);
     belya_agent_persist_memory_scoped(agent, fused_topic, fusion_ds.data, "distilled_schemata", cluster_room);
     free(fusion_ds.data);
