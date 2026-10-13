@@ -48,6 +48,8 @@ typedef struct BelyaAgent {
     float recent_form;          /* M2.1/R6(a): measured EWMA of real outcomes, 1.0 = in form */
     size_t recent_form_samples; /* Observations folded into recent_form */
     char db_path[256];
+    void (*pre_compact_hook)(void *userdata);
+    void *pre_compact_userdata;
 } BelyaAgent;
 
 // SARSI Persistent Self-Model (Organism Introspection)
@@ -92,6 +94,22 @@ char *almaz_simplemem_query_facts(BelyaAgent *agent, const char *entity_key, con
 void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent);
 void belya_agent_compact_history_middle_out(BelyaAgent *agent, size_t keep_recent);
 void belya_agent_clear_history(BelyaAgent *agent);
+
+#define SYSTEM_PROMPT_DYNAMIC_BOUNDARY "\n\n=== Dynamic Session State ===\n"
+
+// 2026 Competitive Parity Phase 2: 5-Tier Compactor & Lossless Archival
+typedef enum {
+    COMPACT_TIER_1_MICRO = 1,
+    COMPACT_TIER_2_TRUNCATE_TOOLS,
+    COMPACT_TIER_3_MIDDLE_OUT,
+    COMPACT_TIER_4_FTS5_EVICT,
+    COMPACT_TIER_5_EMERGENCY
+} CompactTier;
+
+void belya_agent_compact_5tier(BelyaAgent *agent, CompactTier tier, size_t keep_recent);
+
+typedef void (*BelyaPreCompactHookFn)(void *userdata);
+void belya_agent_set_pre_compact_hook(BelyaAgent *agent, BelyaPreCompactHookFn fn, void *userdata);
 
 // Token Budgeting & Estimation
 size_t belya_agent_total_tokens(const BelyaAgent *agent);
