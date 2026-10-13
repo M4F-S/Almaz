@@ -118,6 +118,10 @@ char *belya_harness_audit_security_variants(BelyaHarness *h, const char *pattern
 
 void belya_harness_free(BelyaHarness *h);
 
+// 2026 Competitive Parity Phase 1: Stateful ANSI Diff Colorizer & Signal-Safe Modal
+char *belya_ansi_diff_colorize(const char *raw_diff);
+bool belya_terminal_permission_prompt(BelyaHarness *h, const char *tool_name, const char *args_json, void *userdata);
+
 extern const char *g_active_custom_script_path;
 
 #endif
