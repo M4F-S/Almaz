@@ -875,7 +875,7 @@ size_t almaz_concept_fusion_sweep(BelyaAgent *agent) {
         }
     }
 
-    char log_buf[256];
+    char log_buf[512];
     snprintf(log_buf, sizeof(log_buf), "Subconscious Concept Fusion: distilled %zu episodes into [%s]", fetched, fused_topic);
     belya_agent_log_timeline(agent, "concept_fusion_complete", log_buf);
 
