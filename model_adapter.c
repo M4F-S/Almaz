@@ -543,13 +543,19 @@ static ModelGatewayResponse openai_chat_complete(ModelGateway *self, const JsonV
     ModelGatewayResponse res = openai_chat_complete_inner(self, messages_json, tools_schema, false);
 
     /* R7 (2026-10-11): provider-failover support. */
-    if (self->fallback_endpoint && self->fallback_api_key && strlen(self->fallback_api_key) > 0 &&
+    bool same_ep = (self->endpoint && self->fallback_endpoint && strcmp(self->endpoint, self->fallback_endpoint) == 0 &&
+                    self->model && self->fallback_model && strcmp(self->model, self->fallback_model) == 0);
+
+    if (!same_ep && self->fallback_endpoint && self->fallback_api_key && strlen(self->fallback_api_key) > 0 &&
         gateway_response_is_hard_failure(&res)) {
-        fprintf(stderr, "\033[1;33m[ModelGateway Failover]: Primary endpoint '%s' failed (%s) -> failing over to '%s' (%s)...\033[0m\n",
+        char *primary_err = res.content ? xstrdup(res.content) : xstrdup("Unknown error");
+        fprintf(stderr, "\033[1;33m[ModelGateway Failover]: Primary endpoint '%s' (%s) failed [%s]. Switching to fallback '%s' (%s)...\033[0m\n",
                 self->endpoint ? self->endpoint : "unknown",
-                res.content ? res.content : "unknown",
+                self->model ? self->model : "",
+                primary_err,
                 self->fallback_endpoint,
                 self->fallback_model ? self->fallback_model : "");
+        free(primary_err);
         model_gateway_response_free(&res);
         res = openai_chat_complete_inner(self, messages_json, tools_schema, true);
     }
