@@ -12,6 +12,11 @@ static int run_selfest(void) {
     printf("[Selfest] Almaz self-test\n");
     int rc = 0;
     sqlite3 *db = NULL;
+    if (access("almaz_memory.sqlite", F_OK) != 0) {
+        /* Bootstrap database schema if freshly cloned */
+        BelyaAgent *ba = belya_agent_init(NULL, "almaz_memory.sqlite", NULL);
+        if (ba) belya_agent_free(ba);
+    }
     /* R5 (2026-10-10): busy timeout on the read-only handle too. */
     if (sqlite3_open_v2("almaz_memory.sqlite", &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
         sqlite3_busy_timeout(db, 5000);
