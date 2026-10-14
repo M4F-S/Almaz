@@ -49,4 +49,8 @@ $(BENCHMARK_TARGET): $(BENCHMARK_SRCS)
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) $(WATCHDOG_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
 
-.PHONY: all test holdout benchmark clean
+gdrive:
+	@./scripts/sync_to_gdrive.sh
+
+.PHONY: all test holdout benchmark clean gdrive
+
