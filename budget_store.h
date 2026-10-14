@@ -51,4 +51,10 @@ bool budget_state_consume(BudgetState *bs, const BudgetLimits *lim,
                           long prompt_tokens, long completion_tokens,
                           long cached_tokens, long duration_sec, bool *sealed);
 
+/* Late-2026 MIT IDE Soft Constraints: Allows 5% emergency budget headroom during critical remediation */
+bool budget_state_consume_with_headroom(BudgetState *bs, const BudgetLimits *lim,
+                                       long prompt_tokens, long completion_tokens,
+                                       long cached_tokens, long duration_sec,
+                                       bool emergency_headroom, bool *sealed);
+
 #endif /* BUDGET_STORE_H */

@@ -1,5 +1,6 @@
 #include "belya_harness.h"
 #include "telegram_adapter.h"
+#include "belya_channel.h"
 #include "minifrontmatter.h"
 #include "health_watcher.h"
 #include "timeline_anomaly.h"
@@ -7,6 +8,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <math.h>
 
 void test_dyn_string(void) {
     printf("[Test] DynString Operations...\n");
@@ -2692,6 +2694,1220 @@ void test_security_adversarial_suite(void) {
     printf("  -> Security & Adversarial Hardening Suite PASSED\n");
 }
 
+void test_in_context_loop_breaker(void) {
+    printf("[Test] Late-2026 In-Context Locking Breaker (Attractor Detection)...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_loop_breaker_almaz.sqlite", "Test System Prompt");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Period 1 detection: 3 identical tool calls
+    char *breaker_msg = NULL;
+    bool tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "read_file", "{\"path\":\"README.md\"}", "content line 1", &breaker_msg);
+    assert(tripped && breaker_msg != NULL);
+    assert(strstr(breaker_msg, "DETERMINISTIC ATTRACTOR DETECTED (Period 1)") != NULL);
+    assert(h->loop_breaker_tripped == true);
+    assert(h->loop_detector.detected_period == 1);
+    free(breaker_msg);
+
+    // 2. Turn reset clears detector
+    belya_harness_reset_turn_state(h);
+    assert(h->loop_breaker_tripped == false);
+    assert(h->loop_detector.count == 0);
+
+    // 3. Period 2 detection: alternating oscillation A -> B -> A -> B -> A -> B
+    const char *tool_a = "{\"command\":\"pwd\"}";
+    const char *tool_b = "{\"command\":\"ls\"}";
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_a, "/home", &breaker_msg);
+    assert(!tripped && breaker_msg == NULL);
+    tripped = belya_harness_record_tool_observation(h, "bash", tool_b, "file1 file2", &breaker_msg);
+    assert(tripped && breaker_msg != NULL);
+    assert(strstr(breaker_msg, "DETERMINISTIC ATTRACTOR DETECTED (Period 2)") != NULL);
+    assert(h->loop_breaker_tripped == true);
+    assert(h->loop_detector.detected_period == 2);
+    free(breaker_msg);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_loop_breaker_almaz.sqlite");
+    printf("  -> Late-2026 In-Context Locking Breaker PASSED\n");
+}
+
+void test_context_compactor_middle_out(void) {
+    printf("[Test] Late-2026 128-Call / 96k Middle-Out Context Compactor...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_compactor_almaz.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    // Add root user instruction
+    belya_agent_add_message(agent, "user", "ROOT MISSION: Refactor IPv6 parser and verify zero memory leaks.");
+
+    // Add 20 intermediate turns
+    for (int i = 0; i < 20; i++) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Intermediate step %d: inspecting code lines %d-%d", i, i * 10, i * 10 + 10);
+        belya_agent_add_message(agent, (i % 2 == 0) ? "assistant" : "user", buf);
+    }
+    assert(agent->msg_count == 22);
+
+    // Perform middle-out compaction retaining 4 recent messages
+    belya_agent_compact_history_middle_out(agent, 4);
+
+    // Layout must be:
+    // Index 0: system
+    // Index 1: root user objective (PINNED!)
+    // Index 2: summary of intermediate steps
+    // Index 3..6: 4 recent messages
+    assert(agent->msg_count == 7);
+    assert(strcmp(agent->messages[0].role, "system") == 0);
+    assert(strcmp(agent->messages[1].role, "user") == 0);
+    assert(strstr(agent->messages[1].content, "ROOT MISSION:") != NULL);
+    assert(strcmp(agent->messages[2].role, "assistant") == 0);
+    assert(strstr(agent->messages[2].content, "[CONTEXT COMPACTOR: INTERMEDIATE TURNS") != NULL);
+    assert(strstr(agent->messages[2].content, "Root mission constraints pinned") != NULL);
+
+    // Verify lossless archival in SQLite table session_messages_archived
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM session_messages_archived;", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    rc = sqlite3_step(stmt);
+    assert(rc == SQLITE_ROW);
+    int archived_count = sqlite3_column_int(stmt, 0);
+    assert(archived_count >= 15);
+    sqlite3_finalize(stmt);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_compactor_almaz.sqlite");
+    printf("  -> Late-2026 Middle-Out Context Compactor PASSED\n");
+}
+
+void test_fademem_biological_decay(void) {
+    printf("[Test] Late-2026 FadeMem Biological Decay (Mathematical & FTS5 Bounds)...\n");
+
+    time_t now = time(NULL);
+
+    // 1. Retention at t=0
+    double ret_now = almaz_fademem_retention(now, now, 0, 1.0, 0.05);
+    assert(fabs(ret_now - 1.0) < 1e-4);
+
+    // 2. Retention after 30 days without reinforcement
+    time_t t_30d_ago = now - (30 * 86400);
+    double ret_30d_stale = almaz_fademem_retention(now, t_30d_ago, 0, 1.0, 0.05);
+    assert(ret_30d_stale < 0.25 && ret_30d_stale > 0.20);
+
+    // 3. Spacing effect: 20 accesses over 30 days
+    double ret_30d_reinforced = almaz_fademem_retention(now, t_30d_ago, 20, 1.0, 0.05);
+    assert(ret_30d_reinforced > 0.45);
+    assert(ret_30d_reinforced > ret_30d_stale * 2.0);
+
+    // 4. Test FTS5 hybrid retrieval ranking
+    unlink("test_fademem_agent.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_fademem_agent.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    belya_agent_persist_memory(agent, "DecayTest Stale", "Protocol specification for memory retrieval stale version");
+    belya_agent_persist_memory(agent, "DecayTest Fresh", "Protocol specification for memory retrieval fresh version");
+
+    sqlite3_exec(agent->db,
+        "UPDATE agent_memory SET last_accessed_at = datetime('now', '-60 days'), access_count = 0 WHERE topic = 'DecayTest Stale';",
+        0, 0, 0);
+
+    char *search_res = belya_agent_search_memory(agent, "Protocol specification");
+    assert(search_res != NULL);
+    char *fresh_pos = strstr(search_res, "DecayTest Fresh");
+    char *stale_pos = strstr(search_res, "DecayTest Stale");
+    assert(fresh_pos != NULL);
+    if (stale_pos) {
+        assert(fresh_pos < stale_pos);
+    }
+    free(search_res);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_fademem_agent.sqlite");
+    printf("  -> Late-2026 FadeMem Biological Decay PASSED\n");
+}
+
+void test_fademem_prune_and_concept_fusion(void) {
+    printf("[Test] Late-2026 Subconscious Pruning & Concept Fusion Sweeps...\n");
+
+    unlink("test_subconscious_fusion.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_subconscious_fusion.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    belya_agent_persist_memory(agent, "Decayed Topic", "This ephemeral knowledge was never reinforced and is forgotten.");
+    sqlite3_exec(agent->db,
+        "UPDATE agent_memory SET last_accessed_at = datetime('now', '-100 days'), access_count = 0 WHERE topic = 'Decayed Topic';",
+        0, 0, 0);
+
+    size_t pruned = almaz_fademem_prune_sweep(agent, 0.15);
+    assert(pruned == 1);
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory_archive WHERE archived_reason = 'fademem_decay';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    for (int i = 1; i <= 5; i++) {
+        char top[64];
+        snprintf(top, sizeof(top), "Episodic Error %d", i);
+        belya_agent_persist_memory_scoped(agent, top, "POSIX signal SIGTERM requires graceful shutdown in daemon loop.", "posix_wing", "signals_room");
+    }
+
+    size_t fused = almaz_concept_fusion_sweep(agent);
+    assert(fused == 5);
+
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory WHERE wing = 'distilled_schemata' AND room = 'signals_room';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 1);
+    sqlite3_finalize(stmt);
+
+    stmt = NULL;
+    rc = sqlite3_prepare_v2(agent->db, "SELECT count(*) FROM agent_memory_archive WHERE archived_reason = 'concept_fusion_consolidated';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(sqlite3_column_int(stmt, 0) == 5);
+    sqlite3_finalize(stmt);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_subconscious_fusion.sqlite");
+    printf("  -> Late-2026 Subconscious Pruning & Concept Fusion Sweeps PASSED\n");
+}
+
+void test_coral_dual_stream_routing(void) {
+    printf("[Test] Late-2026 CORAL Dual-Stream Memory Routing & Rubrics...\n");
+
+    unlink("test_coral.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_coral.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    almaz_coral_record_tactical(agent, "task_88", "compiler_error", "linker_failure", "ld: undefined symbol: sockaddr_is_private");
+
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(agent->db, "SELECT trace_type, summary FROM tactical_memory WHERE task_id = 'task_88';", -1, &stmt, NULL);
+    assert(rc == SQLITE_OK);
+    assert(sqlite3_step(stmt) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 0), "compiler_error") == 0);
+    assert(strcmp((const char *)sqlite3_column_text(stmt, 1), "linker_failure") == 0);
+    sqlite3_finalize(stmt);
+
+    bool promoted = almaz_coral_promote_strategic(agent, "rubric_linker_undefined",
+        "unresolved_symbol", "ld: undefined symbol",
+        "Object file or C source not passed in gcc compiler command line",
+        "Add missing .c module or static library flag to Makefile target",
+        "task_88");
+    assert(promoted == true);
+
+    char *res = almaz_coral_query_strategic(agent, "linker");
+    assert(res != NULL);
+    assert(strstr(res, "rubric_linker_undefined") != NULL);
+    assert(strstr(res, "Add missing .c module") != NULL);
+    free(res);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_coral.sqlite");
+    printf("  -> Late-2026 CORAL Dual-Stream Memory Routing PASSED\n");
+}
+
+void test_simplemem_atomic_facts(void) {
+    printf("[Test] Late-2026 SimpleMem De-linearized Semantic Fact Extraction...\n");
+
+    unlink("test_simplemem.sqlite");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_simplemem.sqlite", "Test System Prompt");
+    assert(agent != NULL);
+
+    almaz_simplemem_record_fact(agent, "engine.c", "engine.c configures MAX_WORKERS=16 thread pool", 1);
+    almaz_simplemem_record_fact(agent, "engine.c", "engine.c binds to POSIX sockaddr on port 8080", 2);
+    almaz_simplemem_record_fact(agent, "config.h", "config.h defines DEFAULT_TIMEOUT_MS=5000", 3);
+
+    char *res_entity = almaz_simplemem_query_facts(agent, "engine.c", NULL);
+    assert(res_entity != NULL);
+    assert(strstr(res_entity, "MAX_WORKERS=16") != NULL);
+    assert(strstr(res_entity, "port 8080") != NULL);
+    free(res_entity);
+
+    char *res_fts = almaz_simplemem_query_facts(agent, NULL, "DEFAULT_TIMEOUT_MS");
+    assert(res_fts != NULL);
+    assert(strstr(res_fts, "config.h") != NULL);
+    assert(strstr(res_fts, "DEFAULT_TIMEOUT_MS=5000") != NULL);
+    free(res_fts);
+
+    belya_agent_free(agent);
+    model_gateway_free(gw);
+    unlink("test_simplemem.sqlite");
+    printf("  -> Late-2026 SimpleMem De-linearized Semantic Facts PASSED\n");
+}
+
+static void test_soft_constraint_relaxation(void) {
+    printf("[Test] Late-2026 MIT IDE Soft-Constraint Relaxation & Headroom...\n");
+
+    // 1. Budget 5% Emergency Headroom Test
+    BudgetState bs;
+    budget_state_reset_day(&bs);
+    BudgetLimits lim = {0};
+    lim.daily_tokens = 100;
+    bool sealed = false;
+
+    // Normal consumption up to 100
+    assert(budget_state_consume(&bs, &lim, 60, 40, 0, 1, &sealed) == true);
+    assert(sealed); // Sealed under normal 100-token limit
+
+    // With emergency headroom (105 tokens allowed)
+    BudgetState bs_hr;
+    budget_state_reset_day(&bs_hr);
+    sealed = false;
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 60, 40, 0, 1, true, &sealed) == true);
+    assert(!sealed); // 100 spent, but limit is 105 so not yet sealed!
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 2, 2, 0, 1, true, &sealed) == true); // 104 spent
+    assert(!sealed);
+
+    // Exceeding 105 tokens
+    assert(budget_state_consume_with_headroom(&bs_hr, &lim, 5, 0, 0, 1, true, &sealed) == false);
+    assert(sealed);
+
+    // 2. Circuit Breaker Relaxation during Critical Remediation
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_soft_cb.sqlite", "Soft CB Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // Insert pending health remediation goal
+    almaz_goals_add(agent->db, "Fix database disk corruption", "HEALTH_REMEDIATION", 100, "Critical crash recovery");
+
+    char *breaker_msg = NULL;
+    const char *bad_args = "{\"command\": \"cat /nonexistent/disk/status\"}";
+
+    // Fails 1, 2, 3 should NOT trip when max_allowed_failures is relaxed to 5
+    for (int f = 1; f <= 3; f++) {
+        bool tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+        assert(!tripped);
+        assert(breaker_msg == NULL);
+        assert(h->consecutive_tool_failures == f);
+    }
+
+    // 4th failure
+    bool tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+    assert(!tripped);
+    assert(h->consecutive_tool_failures == 4);
+
+    // 5th failure -> Trips circuit breaker!
+    tripped = belya_harness_record_tool_observation(h, "bash", bad_args, "Error: file not found", &breaker_msg);
+    assert(tripped);
+    assert(breaker_msg != NULL);
+    assert(strstr(breaker_msg, "5 times consecutively") != NULL);
+    free(breaker_msg);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_soft_cb.sqlite");
+    printf("  -> Late-2026 MIT IDE Soft-Constraint Relaxation PASSED\n");
+}
+
+static void test_roma_context_firewall(void) {
+    printf("[Test] Late-2026 ROMA Recursive Context Firewall...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_roma.sqlite", "Roma Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    belya_agent_load_manifests(agent, "agents");
+    char *envelope = belya_agency_dispatch_subagent(h, "architect", "Inspect repository structure", "Read-only audit");
+    assert(envelope != NULL);
+    assert(strstr(envelope, "=== Belya Agency Subagent Execution Envelope") != NULL);
+    assert(strstr(envelope, "ROMA Context Firewall: Child execution trace isolated") != NULL);
+    assert(strstr(envelope, "\nExecution Trace:\n") == NULL);
+    free(envelope);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_roma.sqlite");
+    printf("  -> Late-2026 ROMA Recursive Context Firewall PASSED\n");
+}
+
+static void test_symbol_graph_navigation(void) {
+    printf("[Test] Late-2026 AST Symbol Graph Navigation & Call-Tree...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, "test_symbols.sqlite", "Symbol Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    size_t count = belya_harness_index_symbols(h, ".");
+    assert(count > 0);
+
+    char *def = belya_harness_goto_definition(h, "belya_harness_index_symbols");
+    assert(def != NULL);
+    assert(strstr(def, "Symbol Definition: 'belya_harness_index_symbols'") != NULL);
+    free(def);
+
+    char *callers = belya_harness_find_callers(h, "belya_harness_index_symbols");
+    assert(callers != NULL);
+    free(callers);
+
+    BelyaToolCallback cb_goto = get_tool_cb(h, "goto_definition");
+    assert(cb_goto != NULL);
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "symbol", json_create_string("belya_harness_index_symbols"));
+    char *res = cb_goto(agent, args);
+    assert(res != NULL);
+    assert(strstr(res, "Symbol Definition") != NULL);
+    free(res);
+    json_free(args);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_symbols.sqlite");
+    printf("  -> Late-2026 AST Symbol Graph Navigation PASSED (%zu symbols indexed)\n", count);
+}
+
+static void test_repo_to_mcp_synthesis(void) {
+    printf("[Test] Late-2026 Paper2Agent Repo-to-MCP Dynamic Synthesis...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "MCP Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    bool ok = belya_harness_synthesize_mcp_server(h, "paper2agent_calc", "compute_pi", "Compute pi approximation", "echo 3.14159", "{\"type\":\"object\"}");
+    assert(ok == true);
+
+    assert(get_tool_cb(h, "compute_pi") != NULL || h->tool_count >= 19);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink(".belya/mcp/paper2agent_calc_server.sh");
+    printf("  -> Late-2026 Paper2Agent Repo-to-MCP Synthesis PASSED\n");
+}
+
+static void test_mythos_variant_analysis(void) {
+    printf("[Test] Late-2026 Mythos Variant Security Sweeper...\n");
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "hermes-3");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Audit Test");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    char *report = belya_harness_audit_security_variants(h, "all", ".");
+    assert(report != NULL);
+    assert(strstr(report, "Mythos Variant Security Sweeper Report") != NULL);
+    assert(strstr(report, "PoC Verification Command") != NULL);
+    free(report);
+
+    BelyaToolCallback cb_audit = get_tool_cb(h, "audit_security_variants");
+    assert(cb_audit != NULL);
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "pattern_type", json_create_string("buffer_overflow"));
+    json_obj_add(args, "target_path", json_create_string("."));
+    char *obs = cb_audit(agent, args);
+    assert(obs != NULL);
+    assert(strstr(obs, "Mythos Variant Security Sweeper Report") != NULL);
+    free(obs);
+    json_free(args);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    printf("  -> Late-2026 Mythos Variant Security Sweeper PASSED\n");
+}
+
+static void test_phase1_diff_colorizer_and_ask_user(void) {
+    printf("[Test] Phase 1: Stateful Diff Colorizer, ask_user & Signal-Safe Modal...\n");
+
+    // 1. Test Stateful ANSI Diff Colorizer
+    const char *sample_diff = 
+        "diff --git a/test.c b/test.c\n"
+        "--- a/test.c\n"
+        "+++ b/test.c\n"
+        "@@ -10,3 +10,3 @@\n"
+        " unchanged line\n"
+        "----i;\n"
+        "-old_call();\n"
+        "+new_call();\n";
+
+    char *colored = belya_ansi_diff_colorize(sample_diff);
+    assert(colored != NULL);
+    assert(strstr(colored, "\033[32m+new_call();") != NULL);
+    assert(strstr(colored, "\033[31m-old_call();") != NULL);
+    assert(strstr(colored, "\033[31m----i;") != NULL);
+    assert(strstr(colored, "\033[1;36m--- a/test.c") != NULL);
+    free(colored);
+
+    // 2. Test NO_COLOR suppression
+    setenv("NO_COLOR", "1", 1);
+    char *no_color = belya_ansi_diff_colorize(sample_diff);
+    assert(no_color != NULL);
+    assert(strstr(no_color, "\033[") == NULL);
+    free(no_color);
+    unsetenv("NO_COLOR");
+
+    // 3. Test ask_user tool in headless mode
+    setenv("BELYA_TEST_MODE", "1", 1);
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    JsonValue *au_args = json_create_object();
+    json_obj_add(au_args, "question", json_create_string("Do you prefer Approach A or Approach B?"));
+    JsonValue *opts = json_create_array();
+    json_arr_add(opts, json_create_string("Approach A: Zero-allocation"));
+    json_arr_add(opts, json_create_string("Approach B: Ring-buffer"));
+    json_obj_add(au_args, "options", opts);
+
+    BelyaToolCallback ask_cb = NULL;
+    for (size_t i = 0; i < h->tool_count; i++) {
+        if (strcmp(h->tools[i].name, "ask_user") == 0) {
+            ask_cb = h->tools[i].callback;
+            break;
+        }
+    }
+    assert(ask_cb != NULL);
+
+    char *au_res = ask_cb(agent, au_args);
+    assert(au_res != NULL);
+    assert(strstr(au_res, "Approach A or Approach B") != NULL);
+    free(au_res);
+    json_free(au_args);
+
+    // 4. Test belya_terminal_permission_prompt in headless mode
+    bool perm = belya_terminal_permission_prompt(h, "bash", "{\"command\":\"ls\"}", NULL);
+    assert(perm == true);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unsetenv("BELYA_TEST_MODE");
+    printf("  -> Phase 1: Stateful Diff Colorizer, ask_user & Signal-Safe Modal PASSED\n");
+}
+
+static void test_phase2_deterministic_hooks_and_5tier_compactor(void) {
+    printf("[Test] Phase 2: Deterministic Hooks, 5-Tier Compactor & Dynamic Cache Boundary...\n");
+
+    // 1. Test Lifecycle Hook Runner (Exit 2 = Blocked policy, Exit 0 = Allowed)
+    system("mkdir -p .belya/hooks");
+    FILE *fhook = fopen(".belya/hooks/pre_tool_use.sh", "w");
+    assert(fhook != NULL);
+    fprintf(fhook, "#!/bin/sh\n"
+                   "if [ \"$BELYA_TOOL_NAME\" = \"forbidden_tool\" ]; then\n"
+                   "    echo \"Policy Violation: forbidden_tool is strictly blocked.\"\n"
+                   "    exit 2\n"
+                   "fi\n"
+                   "echo \"Tool approved\"\n"
+                   "exit 0\n");
+    fclose(fhook);
+    chmod(".belya/hooks/pre_tool_use.sh", 0755);
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Static System Instructions");
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // Call blocked hook
+    BelyaHookResult r_block = belya_run_lifecycle_hook(h, BELYA_HOOK_PRE_TOOL_USE, "forbidden_tool", "{}", NULL);
+    assert(r_block.blocked == true);
+    assert(r_block.exit_code == 2);
+    assert(r_block.output != NULL);
+    assert(strstr(r_block.output, "forbidden_tool is strictly blocked") != NULL);
+    belya_hook_result_free(&r_block);
+
+    // Call allowed hook
+    BelyaHookResult r_allow = belya_run_lifecycle_hook(h, BELYA_HOOK_PRE_TOOL_USE, "allowed_tool", "{}", NULL);
+    assert(r_allow.blocked == false);
+    assert(r_allow.exit_code == 0);
+    assert(r_allow.output != NULL);
+    assert(strstr(r_allow.output, "Tool approved") != NULL);
+    belya_hook_result_free(&r_allow);
+
+    // Clean up hook script
+    unlink(".belya/hooks/pre_tool_use.sh");
+    rmdir(".belya/hooks");
+
+    // 2. Test SYSTEM_PROMPT_DYNAMIC_BOUNDARY presence
+    assert(strlen(SYSTEM_PROMPT_DYNAMIC_BOUNDARY) > 5);
+
+    // 3. Test 5-Tier Compactor
+    // Add messages
+    belya_agent_add_message(agent, "user", "ROOT MISSION: Verify pure C99 5-tier compaction.");
+    belya_agent_add_message(agent, "assistant", "Working on tier tests...    \n\n\n");
+    assert(agent->msg_count == 3);
+
+    // Tier 1: Micro-pruning (trims trailing whitespace)
+    belya_agent_compact_5tier(agent, COMPACT_TIER_1_MICRO, 0);
+    assert(strcmp(agent->messages[2].content, "Working on tier tests...") == 0);
+
+    // Tier 2: Truncate large tool observation older than 3 turns
+    char *big_tool_obs = malloc(2000);
+    memset(big_tool_obs, 'A', 1999);
+    big_tool_obs[1999] = '\0';
+    belya_agent_add_message(agent, "tool", big_tool_obs);
+    free(big_tool_obs);
+    // Add 3 turns to make tool observation older than 3 turns
+    belya_agent_add_message(agent, "assistant", "Step 1");
+    belya_agent_add_message(agent, "user", "Step 2");
+    belya_agent_add_message(agent, "assistant", "Step 3");
+    assert(agent->msg_count == 7);
+    belya_agent_compact_5tier(agent, COMPACT_TIER_2_TRUNCATE_TOOLS, 0);
+    assert(strstr(agent->messages[3].content, "Truncated") != NULL);
+
+    // Tier 3: Middle-out semantic pruning
+    belya_agent_compact_5tier(agent, COMPACT_TIER_3_MIDDLE_OUT, 2);
+    // Preserves index 0, index 1 (root mission), summary at index 2, and 2 recent turns
+    assert(agent->msg_count == 5);
+    assert(strcmp(agent->messages[0].role, "system") == 0);
+    assert(strstr(agent->messages[1].content, "ROOT MISSION:") != NULL);
+    assert(strstr(agent->messages[2].content, "CONTEXT COMPACTOR") != NULL);
+
+    // Tier 5: Emergency compaction
+    belya_agent_compact_5tier(agent, COMPACT_TIER_5_EMERGENCY, 0);
+    assert(agent->msg_count == 3);
+    assert(strstr(agent->messages[1].content, "EMERGENCY COMPACTION BRIEF") != NULL);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    printf("  -> Phase 2: Deterministic Hooks, 5-Tier Compactor & Dynamic Cache Boundary PASSED\n");
+}
+
+static void test_phase3_task_board_fts5_recall_and_cron(void) {
+    printf("[Test] Phase 3: Task Board, FTS5 Recall & Background Cron Engine...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    unlink("test_phase3_almaz.sqlite");
+    BelyaAgent *agent = belya_agent_init(gw, "test_phase3_almaz.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Task Board Backend Operations
+    int64_t t1 = belya_agent_task_create(agent, "Implement Task Board", "Full C99 SQLite relational task board", "", "Almaz");
+    assert(t1 > 0);
+    int64_t t2 = belya_agent_task_create(agent, "Verify ASan Safety", "Run AddressSanitizer and verify 0 leaks", "1", "Belya");
+    assert(t2 > t1);
+
+    bool up_ok = belya_agent_task_update(agent, t1, "completed", "All schema and tools operational");
+    assert(up_ok);
+
+    char *t1_details = belya_agent_task_get(agent, t1);
+    assert(t1_details && strstr(t1_details, "Implement Task Board") != NULL);
+    assert(strstr(t1_details, "Status:       completed") != NULL);
+    free(t1_details);
+
+    char *all_tasks = belya_agent_task_list(agent, "all");
+    assert(all_tasks && strstr(all_tasks, "Implement Task Board") != NULL);
+    assert(strstr(all_tasks, "Verify ASan Safety") != NULL);
+    free(all_tasks);
+
+    char *pending_tasks = belya_agent_task_list(agent, "pending");
+    assert(pending_tasks && strstr(pending_tasks, "Verify ASan Safety") != NULL);
+    assert(strstr(pending_tasks, "Implement Task Board") == NULL);
+    free(pending_tasks);
+
+    // 2. Cron Engine Backend Operations
+    int64_t c1 = belya_agent_cron_create(agent, "hourly_vacuum", "0 * * * *", "Run database maintenance vacuum");
+    assert(c1 > 0);
+
+    char *cron_jobs = belya_agent_cron_list(agent);
+    assert(cron_jobs && strstr(cron_jobs, "hourly_vacuum") != NULL);
+    assert(strstr(cron_jobs, "0 * * * *") != NULL);
+    free(cron_jobs);
+
+    DynString tick_logs = dyn_str_new();
+    int fired = belya_agent_cron_tick(agent, &tick_logs);
+    assert(fired >= 1);
+    assert(strstr(tick_logs.data, "hourly_vacuum") != NULL);
+    dyn_str_free(&tick_logs);
+
+    // 3. Memory Dream Sweep
+    char *dream_report = belya_agent_dream_sweep(agent);
+    assert(dream_report && strstr(dream_report, "Auto-Dream Sweep") != NULL);
+    free(dream_report);
+
+    // 4. Native Tools Verification via tool callbacks
+    BelyaToolCallback cb_tc = get_tool_cb(h, "task_create");
+    assert(cb_tc != NULL);
+    JsonValue *tc_args = json_create_object();
+    json_obj_add(tc_args, "subject", json_create_string("Test Task via Tool"));
+    json_obj_add(tc_args, "description", json_create_string("Tool harness creation test"));
+    char *tc_res = cb_tc(agent, tc_args);
+    json_free(tc_args);
+    assert(tc_res && strstr(tc_res, "created successfully") != NULL);
+    free(tc_res);
+
+    BelyaToolCallback cb_tl = get_tool_cb(h, "task_list");
+    assert(cb_tl != NULL);
+    JsonValue *tl_args = json_create_object();
+    json_obj_add(tl_args, "status", json_create_string("all"));
+    char *tl_res = cb_tl(agent, tl_args);
+    json_free(tl_args);
+    assert(tl_res && strstr(tl_res, "Test Task via Tool") != NULL);
+    free(tl_res);
+
+    BelyaToolCallback cb_cc = get_tool_cb(h, "cron_create");
+    assert(cb_cc != NULL);
+    JsonValue *cron_args = json_create_object();
+    json_obj_add(cron_args, "name", json_create_string("test_cron_tool"));
+    json_obj_add(cron_args, "schedule", json_create_string("*/5 * * * *"));
+    json_obj_add(cron_args, "prompt", json_create_string("Periodic self-check"));
+    char *cron_res = cb_cc(agent, cron_args);
+    json_free(cron_args);
+    assert(cron_res && strstr(cron_res, "registered with schedule") != NULL);
+    free(cron_res);
+
+    BelyaToolCallback cb_cl = get_tool_cb(h, "cron_list");
+    assert(cb_cl != NULL);
+    JsonValue *empty_args = json_create_object();
+    char *cl_res = cb_cl(agent, empty_args);
+    json_free(empty_args);
+    assert(cl_res && strstr(cl_res, "test_cron_tool") != NULL);
+    free(cl_res);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_phase3_almaz.sqlite");
+    printf("  -> Phase 3: Task Board, FTS5 Recall & Background Cron Engine PASSED\n");
+}
+
+static void test_phase4_plan_mode_and_worktrees(void) {
+    printf("[Test] Phase 4: Plan Mode Sandbox, Isolated Git Worktrees & SKILL.md Parity...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_phase4_almaz.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Verify Tool Callbacks are Registered
+    BelyaToolCallback cb_epm = get_tool_cb(h, "enter_plan_mode");
+    BelyaToolCallback cb_xpm = get_tool_cb(h, "exit_plan_mode");
+    BelyaToolCallback cb_ew = get_tool_cb(h, "enter_worktree");
+    BelyaToolCallback cb_lw = get_tool_cb(h, "leave_worktree");
+    assert(cb_epm != NULL);
+    assert(cb_xpm != NULL);
+    assert(cb_ew != NULL);
+    assert(cb_lw != NULL);
+
+    // 2. Test Plan Mode Activation & Mutating Guards
+    assert(h->plan_mode == false);
+    JsonValue *empty_args = json_create_object();
+    char *epm_res = cb_epm(agent, empty_args);
+    json_free(empty_args);
+    assert(epm_res && strstr(epm_res, "Plan Mode activated") != NULL);
+    free(epm_res);
+    assert(h->plan_mode == true);
+
+    // Test write_file blocked in Plan Mode
+    BelyaToolCallback cb_write = get_tool_cb(h, "write_file");
+    assert(cb_write != NULL);
+    JsonValue *wr_args = json_create_object();
+    json_obj_add(wr_args, "path", json_create_string("test_blocked.txt"));
+    json_obj_add(wr_args, "content", json_create_string("blocked content"));
+    char *wr_res = cb_write(agent, wr_args);
+    json_free(wr_args);
+    assert(wr_res && strstr(wr_res, "Blocked: Plan Mode is active") != NULL);
+    free(wr_res);
+
+    // Test edit_file blocked in Plan Mode
+    BelyaToolCallback cb_edit = get_tool_cb(h, "edit_file");
+    assert(cb_edit != NULL);
+    JsonValue *ed_args = json_create_object();
+    json_obj_add(ed_args, "path", json_create_string("test_blocked.txt"));
+    json_obj_add(ed_args, "old_text", json_create_string("old"));
+    json_obj_add(ed_args, "new_text", json_create_string("new"));
+    char *ed_res = cb_edit(agent, ed_args);
+    json_free(ed_args);
+    assert(ed_res && strstr(ed_res, "Blocked: Plan Mode is active") != NULL);
+    free(ed_res);
+
+    // Test apply_patch blocked in Plan Mode
+    BelyaToolCallback cb_patch = get_tool_cb(h, "apply_patch");
+    assert(cb_patch != NULL);
+    JsonValue *pt_args = json_create_object();
+    json_obj_add(pt_args, "path", json_create_string("test_blocked.txt"));
+    json_obj_add(pt_args, "patch", json_create_string("patch data"));
+    char *pt_res = cb_patch(agent, pt_args);
+    json_free(pt_args);
+    assert(pt_res && strstr(pt_res, "Blocked: Plan Mode is active") != NULL);
+    free(pt_res);
+
+    // Test bash mutating command blocked in Plan Mode
+    BelyaToolCallback cb_bash = get_tool_cb(h, "bash");
+    assert(cb_bash != NULL);
+    JsonValue *bsh_mut = json_create_object();
+    json_obj_add(bsh_mut, "command", json_create_string("rm -rf nonexistent_file.txt"));
+    char *bsh_mut_res = cb_bash(agent, bsh_mut);
+    json_free(bsh_mut);
+    assert(bsh_mut_res && strstr(bsh_mut_res, "Blocked: Plan Mode is active") != NULL);
+    free(bsh_mut_res);
+
+    // Test read-only bash command allowed in Plan Mode
+    JsonValue *bsh_ro = json_create_object();
+    json_obj_add(bsh_ro, "command", json_create_string("echo plan_mode_read_only_ok"));
+    char *bsh_ro_res = cb_bash(agent, bsh_ro);
+    json_free(bsh_ro);
+    assert(bsh_ro_res && strstr(bsh_ro_res, "plan_mode_read_only_ok") != NULL);
+    free(bsh_ro_res);
+
+    // Deactivate Plan Mode
+    empty_args = json_create_object();
+    char *xpm_res = cb_xpm(agent, empty_args);
+    json_free(empty_args);
+    assert(xpm_res && strstr(xpm_res, "Plan Mode deactivated") != NULL);
+    free(xpm_res);
+    assert(h->plan_mode == false);
+
+    // 3. Test Git Worktree Sandbox Lifecycle
+    char orig_cwd[4096];
+    assert(getcwd(orig_cwd, sizeof(orig_cwd)) != NULL);
+
+    char *wt_enter = belya_harness_enter_worktree(h, "test_phase4_branch");
+    assert(wt_enter != NULL);
+    assert(strstr(wt_enter, "Entered isolated git worktree") != NULL);
+    free(wt_enter);
+    assert(h->in_worktree == true);
+
+    char current_cwd[4096];
+    assert(getcwd(current_cwd, sizeof(current_cwd)) != NULL);
+    assert(strstr(current_cwd, ".almaz/worktrees/wt_test_phase4_branch") != NULL);
+
+    char *wt_leave = belya_harness_leave_worktree(h, false);
+    assert(wt_leave != NULL);
+    assert(strstr(wt_leave, "Left git worktree") != NULL);
+    free(wt_leave);
+    assert(h->in_worktree == false);
+
+    char restored_cwd[4096];
+    assert(getcwd(restored_cwd, sizeof(restored_cwd)) != NULL);
+    assert(strcmp(restored_cwd, orig_cwd) == 0);
+
+    // 4. Test .almaz/skills/ Discovery
+    system("mkdir -p .almaz/skills/test_p4_skill");
+    FILE *skf = fopen(".almaz/skills/test_p4_skill/SKILL.md", "w");
+    assert(skf != NULL);
+    fprintf(skf, "---\nname: test_p4_skill\ndescription: Phase 4 Plan Mode Verification Skill\ntriggers: p4, plan_test\n---\nStep 1: Check invariants\nStep 2: Assert.\n");
+    fclose(skf);
+
+    size_t loaded_skills = belya_agent_load_disk_skills(agent, ".almaz/skills");
+    assert(loaded_skills >= 1);
+
+    char *found_skill = belya_agent_search_skills(agent, "plan_test");
+    assert(found_skill != NULL);
+    assert(strstr(found_skill, "test_p4_skill") != NULL);
+    free(found_skill);
+
+    unlink(".almaz/skills/test_p4_skill/SKILL.md");
+    rmdir(".almaz/skills/test_p4_skill");
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_phase4_almaz.sqlite");
+    printf("  -> Phase 4: Plan Mode Sandbox, Isolated Git Worktrees & SKILL.md Parity PASSED\n");
+}
+
+static void test_phase5_pty_subshells_and_task_manager(void) {
+    printf("[Test] Phase 5: POSIX PTY Subshells & Background Task Manager...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_phase5_almaz.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Verify manage_task tool callback is registered
+    BelyaToolCallback cb_mt = get_tool_cb(h, "manage_task");
+    assert(cb_mt != NULL);
+
+    // 2. Spawn a short-lived background task via PTY
+    int t1 = belya_harness_spawn_task(h, "echo 'almaz_pty_task_output_verified'");
+    assert(t1 > 0);
+
+    // Wait a brief moment for output capture and exit
+    usleep(150000);
+
+    char *t1_status = belya_harness_task_status(h, t1);
+    assert(t1_status != NULL);
+    assert(strstr(t1_status, "Task ID: 1") != NULL);
+    assert(strstr(t1_status, "almaz_pty_task_output_verified") != NULL);
+    assert(strstr(t1_status, "completed") != NULL);
+    free(t1_status);
+
+    // 3. Spawn a long-running background task and test process group kill
+    int t2 = belya_harness_spawn_task(h, "sleep 30");
+    assert(t2 > 0);
+
+    char *task_list = belya_harness_task_list(h);
+    assert(task_list != NULL);
+    assert(strstr(task_list, "sleep 30") != NULL);
+    free(task_list);
+
+    char *t2_status = belya_harness_task_status(h, t2);
+    assert(t2_status != NULL);
+    assert(strstr(t2_status, "running") != NULL);
+    free(t2_status);
+
+    // Test terminating the task group
+    char *kill_res = belya_harness_task_kill(h, t2);
+    assert(kill_res != NULL);
+    assert(strstr(kill_res, "terminated successfully") != NULL);
+    free(kill_res);
+
+    char *t2_post_kill = belya_harness_task_status(h, t2);
+    assert(t2_post_kill != NULL);
+    assert(strstr(t2_post_kill, "killed") != NULL);
+    free(t2_post_kill);
+
+    // 4. Test tool_manage_task tool callback
+    JsonValue *list_args = json_create_object();
+    json_obj_add(list_args, "action", json_create_string("list"));
+    char *tool_list_res = cb_mt(agent, list_args);
+    json_free(list_args);
+    assert(tool_list_res != NULL);
+    assert(strstr(tool_list_res, "Active & Background Tasks Table") != NULL);
+    free(tool_list_res);
+
+    // 5. Test tool_bash with background:true
+    BelyaToolCallback cb_bash = get_tool_cb(h, "bash");
+    assert(cb_bash != NULL);
+    JsonValue *bg_args = json_create_object();
+    json_obj_add(bg_args, "command", json_create_string("echo 'bg_bash_verified'"));
+    json_obj_add(bg_args, "background", json_create_bool(true));
+    char *bg_res = cb_bash(agent, bg_args);
+    json_free(bg_args);
+    assert(bg_res != NULL);
+    assert(strstr(bg_res, "Command launched in background PTY subshell") != NULL);
+    free(bg_res);
+
+    // Clean up harness and verify deterministic descriptor & process reaping
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_phase5_almaz.sqlite");
+    printf("  -> Phase 5: POSIX PTY Subshells & Background Task Manager PASSED\n");
+}
+
+static void test_phase6_web_search_notebook_and_lsp(void) {
+    printf("[Test] Phase 6: Web Search/Fetch, Notebook Splicer & LSP-over-MCP...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_phase6_almaz.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Test HTML-to-Markdown Parser (belya_html_to_markdown)
+    const char *test_html = 
+        "<html><head><title>Test Doc</title>"
+        "<style>body { color: red; }</style>"
+        "<script>console.log('malicious script');</script>"
+        "</head><body>"
+        "<h1>Overview Header</h1>"
+        "<p>This is a paragraph with <b>bold</b> and <a href=\"https://example.com/doc\">documentation link</a>.</p>"
+        "<ul><li>First feature item</li><li>Second feature item</li></ul>"
+        "<pre><code>int x = 42;</code></pre>"
+        "<!-- Comment to strip -->"
+        "</body></html>";
+
+    char *md_output = belya_html_to_markdown(test_html, 51200);
+    assert(md_output != NULL);
+    assert(strstr(md_output, "# Overview Header") != NULL);
+    assert(strstr(md_output, "[documentation link](https://example.com/doc)") != NULL);
+    assert(strstr(md_output, "* First feature item") != NULL);
+    assert(strstr(md_output, "* Second feature item") != NULL);
+    assert(strstr(md_output, "int x = 42;") != NULL);
+    assert(strstr(md_output, "malicious script") == NULL);
+    assert(strstr(md_output, "color: red") == NULL);
+    free(md_output);
+
+    // 2. Test Multi-Provider Web Search (belya_harness_web_search)
+    char *search_res = belya_harness_web_search(h, "mock_test_search", "mock");
+    assert(search_res != NULL);
+    assert(strstr(search_res, "Web Search Results for") != NULL);
+    assert(strstr(search_res, "Official C99 Specification") != NULL);
+    assert(strstr(search_res, "POSIX.1-2008") != NULL);
+    free(search_res);
+
+    // 3. Test Jupyter Notebook Splicer (belya_harness_edit_notebook)
+    const char *test_nb_path = "test_phase6_almaz_nb.ipynb";
+    const char *initial_nb_json = 
+        "{\n"
+        "  \"cells\": [\n"
+        "    {\n"
+        "      \"cell_type\": \"markdown\",\n"
+        "      \"metadata\": {},\n"
+        "      \"source\": \"# Initial Title\\nFirst markdown text.\"\n"
+        "    },\n"
+        "    {\n"
+        "      \"cell_type\": \"code\",\n"
+        "      \"execution_count\": 1,\n"
+        "      \"metadata\": {},\n"
+        "      \"outputs\": [{\"output_type\": \"stream\", \"text\": \"Execution output 1\\n\"}],\n"
+        "      \"source\": \"print('initial code')\"\n"
+        "    }\n"
+        "  ],\n"
+        "  \"metadata\": {},\n"
+        "  \"nbformat\": 4,\n"
+        "  \"nbformat_minor\": 2\n"
+        "}";
+
+    FILE *nbf = fopen(test_nb_path, "w");
+    assert(nbf != NULL);
+    fputs(initial_nb_json, nbf);
+    fclose(nbf);
+
+    // 3a. Read action
+    char *nb_read = belya_harness_edit_notebook(h, test_nb_path, "read", -1, NULL, NULL);
+    assert(nb_read != NULL);
+    assert(strstr(nb_read, "Jupyter Notebook: test_phase6_almaz_nb.ipynb (2 cells") != NULL);
+    assert(strstr(nb_read, "Initial Title") != NULL);
+    assert(strstr(nb_read, "print('initial code')") != NULL);
+    free(nb_read);
+
+    // 3b. Replace cell action
+    char *nb_repl = belya_harness_edit_notebook(h, test_nb_path, "replace_cell", 1, "code", "print('modified code')");
+    assert(nb_repl != NULL);
+    assert(strstr(nb_repl, "successfully replaced") != NULL);
+    free(nb_repl);
+
+    char *nb_read_post_repl = belya_harness_edit_notebook(h, test_nb_path, "read", -1, NULL, NULL);
+    assert(nb_read_post_repl != NULL);
+    assert(strstr(nb_read_post_repl, "print('modified code')") != NULL);
+    free(nb_read_post_repl);
+
+    // 3c. Insert cell action
+    char *nb_ins = belya_harness_edit_notebook(h, test_nb_path, "insert_cell", 2, "markdown", "### Appended Section");
+    assert(nb_ins != NULL);
+    assert(strstr(nb_ins, "successfully inserted") != NULL);
+    free(nb_ins);
+
+    char *nb_read_post_ins = belya_harness_edit_notebook(h, test_nb_path, "read", -1, NULL, NULL);
+    assert(nb_read_post_ins != NULL);
+    assert(strstr(nb_read_post_ins, "3 cells") != NULL);
+    assert(strstr(nb_read_post_ins, "Appended Section") != NULL);
+    free(nb_read_post_ins);
+
+    // 3d. Delete cell action
+    char *nb_del = belya_harness_edit_notebook(h, test_nb_path, "delete_cell", 0, NULL, NULL);
+    assert(nb_del != NULL);
+    assert(strstr(nb_del, "successfully deleted") != NULL);
+    free(nb_del);
+
+    char *nb_read_post_del = belya_harness_edit_notebook(h, test_nb_path, "read", -1, NULL, NULL);
+    assert(nb_read_post_del != NULL);
+    assert(strstr(nb_read_post_del, "2 cells") != NULL);
+    assert(strstr(nb_read_post_del, "Initial Title") == NULL);
+    free(nb_read_post_del);
+
+    unlink(test_nb_path);
+
+    // 4. Test LSP-over-MCP & Native Symbol Graph
+    belya_harness_index_symbols(h, ".");
+
+    char *def_res = belya_harness_lsp_definition(h, "belya_harness.h", 1, 1, "belya_harness_init");
+    assert(def_res != NULL);
+    assert(strstr(def_res, "LSP Definition") != NULL);
+    assert(strstr(def_res, "belya_harness_init") != NULL);
+    free(def_res);
+
+    char *ref_res = belya_harness_lsp_references(h, "belya_harness.h", 1, 1, "belya_harness_init");
+    assert(ref_res != NULL);
+    assert(strstr(ref_res, "LSP References") != NULL);
+    free(ref_res);
+
+    // 5. Test Tool Callbacks Registration
+    assert(get_tool_cb(h, "web_search") != NULL);
+    assert(get_tool_cb(h, "web_fetch") != NULL);
+    assert(get_tool_cb(h, "edit_notebook") != NULL);
+    assert(get_tool_cb(h, "lsp_definition") != NULL);
+    assert(get_tool_cb(h, "lsp_references") != NULL);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_phase6_almaz.sqlite");
+    printf("  -> Phase 6: Web Search/Fetch, Notebook Splicer & LSP-over-MCP PASSED\n");
+}
+
+static void test_phase7_omnichannel_and_remote_backends(void) {
+    printf("[Test] Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_phase7_almaz.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    // 1. Test Discord Adapter & Event Handling
+    BelyaDiscordAdapter *discord = belya_discord_init("mock_token_123", "chan_999");
+    assert(discord != NULL);
+    assert(strcmp(discord->bot_token, "mock_token_123") == 0);
+    assert(discord->heartbeat_interval_ms == 41250);
+
+    // Test sending message (mock token bypasses network)
+    bool disc_sent = belya_discord_send_message(discord, "chan_999", "Hello Discord from Almaz");
+    assert(disc_sent == true);
+
+    // Test Discord Opcode 10 Hello Event
+    const char *discord_hello = "{\"op\": 10, \"d\": {\"heartbeat_interval\": 45000}}";
+    BelyaChannelMessage msg;
+    bool hello_handled = belya_discord_handle_event(discord, discord_hello, &msg);
+    assert(hello_handled == false);
+    assert(discord->connected == true);
+    assert(discord->heartbeat_interval_ms == 45000);
+
+    // Test Discord Opcode 0 Message Create Event
+    const char *discord_msg_json = 
+        "{\"op\": 0, \"t\": \"MESSAGE_CREATE\", \"s\": 42, \"d\": {"
+        "  \"channel_id\": \"chan_999\","
+        "  \"content\": \"Deploy phase 7 immediately\","
+        "  \"id\": \"msg_101\","
+        "  \"author\": {\"id\": \"user_42\", \"username\": \"almaz_operator\"}"
+        "}}";
+    bool msg_handled = belya_discord_handle_event(discord, discord_msg_json, &msg);
+    assert(msg_handled == true);
+    assert(strcmp(msg.platform, "discord") == 0);
+    assert(strcmp(msg.channel_id, "chan_999") == 0);
+    assert(strcmp(msg.user_id, "user_42") == 0);
+    assert(strcmp(msg.user_name, "almaz_operator") == 0);
+    assert(strcmp(msg.text, "Deploy phase 7 immediately") == 0);
+    assert(discord->last_sequence == 42);
+
+    // Test Discord Thread Mapping Session ID
+    char disc_session_id[256];
+    belya_channel_get_session_id(&msg, disc_session_id, sizeof(disc_session_id));
+    assert(strcmp(disc_session_id, "discord_chan_999") == 0);
+
+    // 2. Test Slack Adapter & Webhook Ingress (< 100 ms Challenge Response)
+    BelyaSlackAdapter *slack = belya_slack_init("mock_xoxb_123", "mock_xapp_456", "C0123456");
+    assert(slack != NULL);
+    assert(strcmp(slack->bot_token, "mock_xoxb_123") == 0);
+
+    bool slack_sent = belya_slack_send_message(slack, "C0123456", "Hello Slack from Almaz");
+    assert(slack_sent == true);
+
+    // Test Slack url_verification challenge
+    const char *slack_verify_json = "{\"type\": \"url_verification\", \"challenge\": \"3eZbrw1aWjvWqWOrWVuFlKHgABC\"}";
+    char ack_buf[512] = {0};
+    bool is_event = belya_slack_handle_webhook(slack, slack_verify_json, &msg, ack_buf, sizeof(ack_buf));
+    assert(is_event == false);
+    assert(strstr(ack_buf, "3eZbrw1aWjvWqWOrWVuFlKHgABC") != NULL);
+
+    // Test Slack event_callback
+    const char *slack_event_json = 
+        "{\"type\": \"event_callback\", \"event\": {"
+        "  \"channel\": \"C0123456\","
+        "  \"user\": \"U98765\","
+        "  \"text\": \"Run integration tests\","
+        "  \"thread_ts\": \"1712345678.000100\""
+        "}}";
+    memset(ack_buf, 0, sizeof(ack_buf));
+    is_event = belya_slack_handle_webhook(slack, slack_event_json, &msg, ack_buf, sizeof(ack_buf));
+    assert(is_event == true);
+    assert(strstr(ack_buf, "{\"ok\":true}") != NULL);
+    assert(strcmp(msg.platform, "slack") == 0);
+    assert(strcmp(msg.channel_id, "C0123456") == 0);
+    assert(strcmp(msg.user_id, "U98765") == 0);
+    assert(strcmp(msg.thread_id, "1712345678.000100") == 0);
+    assert(strcmp(msg.text, "Run integration tests") == 0);
+
+    // Test Thread-Specific Session ID Continuity
+    char slack_session_id[256];
+    belya_channel_get_session_id(&msg, slack_session_id, sizeof(slack_session_id));
+    assert(strcmp(slack_session_id, "slack_C0123456_1712345678.000100") == 0);
+
+    // 3. Test Polymorphic Omnichannel Creation & Route
+    BelyaOmniChannel *omni_disc = belya_channel_create_discord("mock_tok", "111");
+    assert(omni_disc != NULL);
+    assert(belya_channel_send(omni_disc, "111", "Testing omni discord") == true);
+
+    BelyaOmniChannel *omni_slack = belya_channel_create_slack("mock_tok", "mock_app", "222");
+    assert(omni_slack != NULL);
+    assert(belya_channel_send(omni_slack, "222", "Testing omni slack") == true);
+
+    // Route message with session continuity
+    char route_reply[1024];
+    bool routed = belya_channel_route_message(omni_disc, h, &msg, route_reply, sizeof(route_reply));
+    assert(routed == true);
+    assert(strlen(route_reply) > 0);
+
+    belya_discord_free(discord);
+    belya_slack_free(slack);
+    belya_channel_free(omni_disc);
+    belya_channel_free(omni_slack);
+
+    // 4. Test Stdin-Piped Remote Execution Backend
+    // Test exec_backend tool
+    BelyaToolCallback cb_eb = get_tool_cb(h, "exec_backend");
+    assert(cb_eb != NULL);
+
+    JsonValue *eb_get_args = json_create_object();
+    json_obj_add(eb_get_args, "action", json_create_string("get"));
+    char *eb_res = cb_eb(agent, eb_get_args);
+    json_free(eb_get_args);
+    assert(eb_res && strstr(eb_res, "Execution backend: local") != NULL);
+    free(eb_res);
+
+    // Set to Docker
+    JsonValue *eb_set_doc = json_create_object();
+    json_obj_add(eb_set_doc, "action", json_create_string("set"));
+    json_obj_add(eb_set_doc, "backend", json_create_string("docker"));
+    json_obj_add(eb_set_doc, "target", json_create_string("sandbox_container_v1"));
+    eb_res = cb_eb(agent, eb_set_doc);
+    json_free(eb_set_doc);
+    assert(eb_res && strstr(eb_res, "docker (container: sandbox_container_v1)") != NULL);
+    free(eb_res);
+    assert(h->exec_backend == BELYA_BACKEND_DOCKER);
+    assert(strcmp(h->docker_container, "sandbox_container_v1") == 0);
+
+    // Set to SSH
+    JsonValue *eb_set_ssh = json_create_object();
+    json_obj_add(eb_set_ssh, "action", json_create_string("set"));
+    json_obj_add(eb_set_ssh, "backend", json_create_string("ssh"));
+    json_obj_add(eb_set_ssh, "target", json_create_string("root@192.168.1.100"));
+    eb_res = cb_eb(agent, eb_set_ssh);
+    json_free(eb_set_ssh);
+    assert(eb_res && strstr(eb_res, "ssh (host: root@192.168.1.100)") != NULL);
+    free(eb_res);
+    assert(h->exec_backend == BELYA_BACKEND_SSH);
+    assert(strcmp(h->ssh_host, "root@192.168.1.100") == 0);
+
+    // Reset back to Local
+    JsonValue *eb_set_loc = json_create_object();
+    json_obj_add(eb_set_loc, "action", json_create_string("set"));
+    json_obj_add(eb_set_loc, "backend", json_create_string("local"));
+    eb_res = cb_eb(agent, eb_set_loc);
+    json_free(eb_set_loc);
+    assert(eb_res && strstr(eb_res, "Execution backend set to: local") != NULL);
+    free(eb_res);
+    assert(h->exec_backend == BELYA_BACKEND_LOCAL);
+
+    // Test zero host shell-quoting execution via belya_remote_exec_piped
+    int exit_code = 0;
+    char *piped_out = belya_remote_exec_piped(BELYA_BACKEND_LOCAL, NULL, NULL, "echo 'zero_quoting_stdin_pipeline_ok'", &exit_code);
+    assert(piped_out != NULL);
+    assert(strstr(piped_out, "zero_quoting_stdin_pipeline_ok") != NULL);
+    assert(exit_code == 0);
+    free(piped_out);
+
+    // Test zero host shell-quoting with nasty strings (double quotes, backticks, dollar signs)
+    char *nasty_out = belya_remote_exec_piped(BELYA_BACKEND_LOCAL, NULL, NULL, "printf \"%s\\n\" \"quotes'and\\\"dollar$VAR`whoami`\"", &exit_code);
+    assert(nasty_out != NULL);
+    assert(exit_code == 0);
+    free(nasty_out);
+
+    // Test missing Docker target validation
+    char *err_doc = belya_remote_exec_piped(BELYA_BACKEND_DOCKER, "", NULL, "ls", &exit_code);
+    assert(err_doc != NULL);
+    assert(strstr(err_doc, "Error: Missing Docker container target") != NULL);
+    free(err_doc);
+
+    // Test missing SSH target validation
+    char *err_ssh = belya_remote_exec_piped(BELYA_BACKEND_SSH, "", NULL, "ls", &exit_code);
+    assert(err_ssh != NULL);
+    assert(strstr(err_ssh, "Error: Missing SSH host target") != NULL);
+    free(err_ssh);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_phase7_almaz.sqlite");
+    printf("  -> Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -2737,7 +3953,25 @@ int main(void) {
     test_budget_controller();
     test_timeline_anomaly();
     test_security_adversarial_suite();
-    printf("================ All Tests Passed Successfully (43/43 - 100%%) ================\n\n");
+    test_in_context_loop_breaker();
+    test_context_compactor_middle_out();
+    test_fademem_biological_decay();
+    test_fademem_prune_and_concept_fusion();
+    test_coral_dual_stream_routing();
+    test_simplemem_atomic_facts();
+    test_soft_constraint_relaxation();
+    test_roma_context_firewall();
+    test_symbol_graph_navigation();
+    test_repo_to_mcp_synthesis();
+    test_mythos_variant_analysis();
+    test_phase1_diff_colorizer_and_ask_user();
+    test_phase2_deterministic_hooks_and_5tier_compactor();
+    test_phase3_task_board_fts5_recall_and_cron();
+    test_phase4_plan_mode_and_worktrees();
+    test_phase5_pty_subshells_and_task_manager();
+    test_phase6_web_search_notebook_and_lsp();
+    test_phase7_omnichannel_and_remote_backends();
+    printf("================ All Tests Passed Successfully (61/61 - 100%%) ================\n\n");
     return 0;
 }
 

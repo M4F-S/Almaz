@@ -48,6 +48,8 @@ typedef struct BelyaAgent {
     float recent_form;          /* M2.1/R6(a): measured EWMA of real outcomes, 1.0 = in form */
     size_t recent_form_samples; /* Observations folded into recent_form */
     char db_path[256];
+    void (*pre_compact_hook)(void *userdata);
+    void *pre_compact_userdata;
 } BelyaAgent;
 
 // SARSI Persistent Self-Model (Organism Introspection)
@@ -74,8 +76,40 @@ void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, co
 void belya_agent_persist_memory(BelyaAgent *agent, const char *topic, const char *content);
 void belya_agent_persist_memory_scoped(BelyaAgent *agent, const char *topic, const char *content, const char *wing, const char *room);
 char *belya_agent_search_memory(BelyaAgent *agent, const char *query);
+
+// Late-2026 Phase 2: FadeMem Biological Memory & Semantics
+double almaz_fademem_retention(time_t now, time_t last_acc, int access_count, double salience, double lambda);
+size_t almaz_fademem_prune_sweep(BelyaAgent *agent, double min_retention);
+size_t almaz_concept_fusion_sweep(BelyaAgent *agent);
+
+// Late-2026 Phase 2: CORAL Dual-Stream Memory Routing
+void almaz_coral_record_tactical(BelyaAgent *agent, const char *task_id, const char *trace_type, const char *summary, const char *details);
+bool almaz_coral_promote_strategic(BelyaAgent *agent, const char *rubric_key, const char *failure_mode, const char *trigger_pattern, const char *root_cause, const char *guideline, const char *source_task);
+char *almaz_coral_query_strategic(BelyaAgent *agent, const char *pattern);
+
+// Late-2026 Phase 2: SimpleMem De-linearized Semantic Facts
+void almaz_simplemem_record_fact(BelyaAgent *agent, const char *entity_key, const char *fact_text, int turn);
+char *almaz_simplemem_query_facts(BelyaAgent *agent, const char *entity_key, const char *query);
+
 void belya_agent_compact_history(BelyaAgent *agent, size_t keep_recent);
+void belya_agent_compact_history_middle_out(BelyaAgent *agent, size_t keep_recent);
 void belya_agent_clear_history(BelyaAgent *agent);
+
+#define SYSTEM_PROMPT_DYNAMIC_BOUNDARY "\n\n=== Dynamic Session State ===\n"
+
+// 2026 Competitive Parity Phase 2: 5-Tier Compactor & Lossless Archival
+typedef enum {
+    COMPACT_TIER_1_MICRO = 1,
+    COMPACT_TIER_2_TRUNCATE_TOOLS,
+    COMPACT_TIER_3_MIDDLE_OUT,
+    COMPACT_TIER_4_FTS5_EVICT,
+    COMPACT_TIER_5_EMERGENCY
+} CompactTier;
+
+void belya_agent_compact_5tier(BelyaAgent *agent, CompactTier tier, size_t keep_recent);
+
+typedef void (*BelyaPreCompactHookFn)(void *userdata);
+void belya_agent_set_pre_compact_hook(BelyaAgent *agent, BelyaPreCompactHookFn fn, void *userdata);
 
 // Token Budgeting & Estimation
 size_t belya_agent_total_tokens(const BelyaAgent *agent);
@@ -131,6 +165,18 @@ BelyaAgentManifest *belya_agent_get_manifest(BelyaAgent *agent, const char *name
 BelyaAgentManifest *belya_agent_route_manifest(BelyaAgent *agent, const char *query);
 void belya_agent_manifest_free(BelyaAgentManifest *manifest);
 char *belya_agent_list_manifests(BelyaAgent *agent);
+
+// Phase 3: Relational Task Board, Cron Engine & Memory Dream Sweep
+int64_t belya_agent_task_create(BelyaAgent *agent, const char *subject, const char *description, const char *dependencies, const char *assigned_agent);
+bool belya_agent_task_update(BelyaAgent *agent, int64_t task_id, const char *status, const char *description);
+char *belya_agent_task_list(BelyaAgent *agent, const char *status_filter);
+char *belya_agent_task_get(BelyaAgent *agent, int64_t task_id);
+
+int64_t belya_agent_cron_create(BelyaAgent *agent, const char *name, const char *schedule_cron, const char *prompt);
+char *belya_agent_cron_list(BelyaAgent *agent);
+int belya_agent_cron_tick(BelyaAgent *agent, DynString *out_logs);
+
+char *belya_agent_dream_sweep(BelyaAgent *agent);
 
 ModelGatewayResponse belya_agent_step(BelyaAgent *agent);
 ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char *instruction);

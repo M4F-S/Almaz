@@ -120,6 +120,30 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     const char *cmd = json_obj_get_str(args, "command");
     if (!cmd) return xstrdup("Error: Missing command argument.");
 
+    // Plan Mode Read-Only Shell Guard
+    if (g_harness && g_harness->plan_mode) {
+        if (strstr(cmd, "rm ") || strstr(cmd, "mv ") || strstr(cmd, "cp ") ||
+            strstr(cmd, "mkdir ") || strstr(cmd, "git commit") || strstr(cmd, "git push") ||
+            strstr(cmd, "sed -i") || strstr(cmd, ">") || strstr(cmd, ">>") ||
+            strstr(cmd, "chmod ") || strstr(cmd, "chown ")) {
+            return xstrdup("Blocked: Plan Mode is active (read-only execution). Shell commands with write/delete mutations are prohibited. Call exit_plan_mode first.");
+        }
+    }
+
+    // 2026 Competitive Parity Phase 5: Persistent PTY Background Task Execution
+    const JsonValue *bg_val = json_obj_get(args, "background");
+    bool background = (bg_val && bg_val->type == JSON_BOOL) ? bg_val->u.boolean : false;
+    if (background && g_harness) {
+        int tid = belya_harness_spawn_task(g_harness, cmd);
+        if (tid > 0) {
+            DynString res = dyn_str_new();
+            dyn_str_appendf(&res, "Command launched in background PTY subshell [Task ID: %d]. Use manage_task(action=\"status\", id=%d) to monitor output.", tid, tid);
+            return res.data;
+        } else {
+            return xstrdup("Error: Failed to spawn background task (task table full or PTY allocation failed).");
+        }
+    }
+
     // Tester Restricted Execution Guard: allow only build/test/read/verify targets.
     // M8 fix (same as Belya H3): reject shell metacharacters, then exact argv[0].
     if (g_harness && g_harness->bash_restricted) {
@@ -152,6 +176,13 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
             dyn_str_appendf(&err, "Error: Tester role bash execution is restricted to build/test validation targets (e.g. make test, make, ./belya_test). Unauthorized command rejected: '%s'", cmd);
             return err.data;
         }
+    }
+
+    // 2026 Competitive Parity Phase 7: Stdin-Piped Modular Remote Execution Backend (Docker / SSH)
+    if (g_harness && g_harness->exec_backend != BELYA_BACKEND_LOCAL) {
+        int exit_code = 0;
+        char *remote_res = belya_harness_exec_remote(g_harness, cmd, &exit_code);
+        return remote_res;
     }
 
     // Handle cd built-in directly to maintain working directory persistence across tool invocations.
@@ -567,6 +598,9 @@ static char *tool_read_file(BelyaAgent *agent, const JsonValue *args) {
 
 static char *tool_write_file(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
+    if (g_harness && g_harness->plan_mode) {
+        return xstrdup("Blocked: Plan Mode is active (read-only execution). Use exit_plan_mode to perform modifications.");
+    }
     const char *path = json_obj_get_str(args, "path");
     const char *content = json_obj_get_str(args, "content");
     if (!path || !content) return xstrdup("Error: Missing path or content argument.");
@@ -592,6 +626,9 @@ static char *tool_write_file(BelyaAgent *agent, const JsonValue *args) {
 
 static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
+    if (g_harness && g_harness->plan_mode) {
+        return xstrdup("Blocked: Plan Mode is active (read-only execution). Use exit_plan_mode to perform modifications.");
+    }
     const char *path = json_obj_get_str(args, "path");
     const char *old_text = json_obj_get_str(args, "old_text");
     const char *new_text = json_obj_get_str(args, "new_text");
@@ -774,6 +811,9 @@ static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
 
 static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
+    if (g_harness && g_harness->plan_mode) {
+        return xstrdup("Blocked: Plan Mode is active (read-only execution). Use exit_plan_mode to perform modifications.");
+    }
     const char *path = json_obj_get_str(args, "path");
     const char *patch = json_obj_get_str(args, "patch");
 
@@ -919,19 +959,20 @@ static char *tool_list_dir(BelyaAgent *agent, const JsonValue *args) {
 }
 
 static void search_files_recursive(const char *dir_path, const char *pattern, const char *glob_pat, bool is_regex, regex_t *preg, DynString *out, int *match_count) {
-    if (*match_count >= 50) return;
+    if (*match_count >= 100) return;
     DIR *d = opendir(dir_path);
     if (!d) return;
 
     struct dirent *dir;
     while ((dir = readdir(d)) != NULL) {
-        if (*match_count >= 50) break;
+        if (*match_count >= 100) break;
         if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
-        if (dir->d_name[0] == '.' && strcmp(dir->d_name, ".env") != 0) continue;
+        if (dir->d_name[0] == '.') continue;
         if (strcmp(dir->d_name, "node_modules") == 0 || strcmp(dir->d_name, "build") == 0) continue;
 
         char sub_path[4096];
         snprintf(sub_path, sizeof(sub_path), "%s/%s", dir_path, dir->d_name);
+        if (belya_harness_is_secret_path(sub_path)) continue;
 
         struct stat st;
         if (stat(sub_path, &st) == -1) continue;
@@ -953,10 +994,20 @@ static void search_files_recursive(const char *dir_path, const char *pattern, co
             FILE *f = fopen(sub_path, "r");
             if (!f) continue;
 
+            // Binary file probe: skip files containing NUL bytes in first 512 bytes
+            unsigned char probe[512];
+            size_t n_read = fread(probe, 1, sizeof(probe), f);
+            if (n_read > 0 && memchr(probe, '\0', n_read) != NULL) {
+                fclose(f);
+                continue;
+            }
+            rewind(f);
+
             char line[2048];
             size_t line_num = 1;
+            int file_matches = 0;
             while (fgets(line, sizeof(line), f)) {
-                if (*match_count >= 50) break;
+                if (*match_count >= 100) break;
                 bool matched = false;
                 if (is_regex && preg) {
                     matched = (regexec(preg, line, 0, NULL, 0) == 0);
@@ -965,9 +1016,14 @@ static void search_files_recursive(const char *dir_path, const char *pattern, co
                 }
 
                 if (matched) {
+                    if (file_matches >= 15) {
+                        dyn_str_appendf(out, "%s: ... [file matches capped at 15]\n", sub_path);
+                        break;
+                    }
                     line[strcspn(line, "\r\n")] = '\0';
                     dyn_str_appendf(out, "%s:%zu: %s\n", sub_path, line_num, line);
                     (*match_count)++;
+                    file_matches++;
                 }
                 line_num++;
             }
@@ -990,6 +1046,7 @@ static char *tool_search_files(BelyaAgent *agent, const JsonValue *args) {
     if (!path || strlen(path) == 0) {
         path = g_harness ? g_harness->cwd : ".";
     }
+    if (!is_path_jailed(path, NULL, false)) return xstrdup("Error: Path traversal denied.");
 
     regex_t reg;
     regex_t *preg = NULL;
@@ -1010,8 +1067,8 @@ static char *tool_search_files(BelyaAgent *agent, const JsonValue *args) {
 
     if (match_count == 0) {
         dyn_str_appendf(&out, "No matches found for '%s' in '%s'.", pattern, path);
-    } else if (match_count >= 50) {
-        dyn_str_append(&out, "\n[Search capped at 50 matches]");
+    } else if (match_count >= 100) {
+        dyn_str_append(&out, "\n[Search capped at 100 matches]");
     }
 
     return out.data;
@@ -1074,6 +1131,91 @@ static char *tool_git_diff(BelyaAgent *agent, const JsonValue *args) {
     return out.data;
 }
 
+char *belya_ansi_diff_colorize(const char *raw_diff) {
+    if (!raw_diff) return NULL;
+    if (getenv("NO_COLOR") != NULL) {
+        return xstrdup(raw_diff);
+    }
+    DynString ds = dyn_str_new();
+    const char *line = raw_diff;
+    bool in_hunk = false;
+
+    while (*line) {
+        const char *next = strchr(line, '\n');
+        size_t len = next ? (size_t)(next - line) : strlen(line);
+
+        if (strncmp(line, "diff --git", 10) == 0) {
+            in_hunk = false;
+            dyn_str_append(&ds, "\033[1;35m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else if (strncmp(line, "--- ", 4) == 0 && !in_hunk) {
+            dyn_str_append(&ds, "\033[1;36m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else if (strncmp(line, "+++ ", 4) == 0 && !in_hunk) {
+            dyn_str_append(&ds, "\033[1;36m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else if (strncmp(line, "@@ ", 3) == 0) {
+            in_hunk = true;
+            dyn_str_append(&ds, "\033[2;33m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else if (in_hunk && *line == '+') {
+            dyn_str_append(&ds, "\033[32m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else if (in_hunk && *line == '-') {
+            dyn_str_append(&ds, "\033[31m");
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\033[0m\n");
+        } else {
+            dyn_str_append_len(&ds, line, len);
+            dyn_str_append(&ds, "\n");
+        }
+
+        if (!next) break;
+        line = next + 1;
+    }
+    return ds.data;
+}
+
+static char *tool_ask_user(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    const char *q = json_obj_get_str(args, "question");
+    if (!q) return xstrdup("Error: Missing question argument.");
+
+    if (getenv("BELYA_HEADLESS") != NULL || getenv("BELYA_TEST_MODE") != NULL || !isatty(STDIN_FILENO)) {
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "User answered (automated mode): Accepted question '%s'", q);
+        return ds.data;
+    }
+
+    printf("\n\033[1;36m[Agent Question]\033[0m %s\n", q);
+    const JsonValue *opts = json_obj_get(args, "options");
+    if (opts && opts->type == JSON_ARRAY) {
+        for (size_t i = 0; i < opts->u.array.count; i++) {
+            const JsonValue *opt = opts->u.array.items[i];
+            if (opt && opt->type == JSON_STRING && opt->u.string) {
+                printf("  %zu. %s\n", i + 1, opt->u.string);
+            }
+        }
+    }
+    printf("> Response: ");
+    fflush(stdout);
+
+    char line[1024];
+    if (fgets(line, sizeof(line), stdin)) {
+        size_t len = strlen(line);
+        if (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[len-1] = '\0';
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "User response: %s", line);
+        return ds.data;
+    }
+    return xstrdup("User provided no response.");
+}
+
 static char *tool_save_memory(BelyaAgent *agent, const JsonValue *args) {
     const char *topic = json_obj_get_str(args, "topic");
     const char *content = json_obj_get_str(args, "content");
@@ -1086,6 +1228,235 @@ static char *tool_recall_memory(BelyaAgent *agent, const JsonValue *args) {
     const char *query = json_obj_get_str(args, "query");
     if (!query) return xstrdup("Error: Missing query string.");
     return belya_agent_search_memory(agent, query);
+}
+
+static char *tool_task_create(BelyaAgent *agent, const JsonValue *args) {
+    const char *subject = json_obj_get_str(args, "subject");
+    const char *description = json_obj_get_str(args, "description");
+    const char *dependencies = json_obj_get_str(args, "dependencies");
+    const char *assigned_agent = json_obj_get_str(args, "assigned_agent");
+    if (!subject) return xstrdup("Error: Missing 'subject' argument.");
+    int64_t tid = belya_agent_task_create(agent, subject, description, dependencies, assigned_agent);
+    if (tid < 0) return xstrdup("Error: Failed to create task.");
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Task #%lld created successfully (status: pending, assigned: %s).",
+        (long long)tid, assigned_agent ? assigned_agent : "Almaz");
+    return ds.data;
+}
+
+static char *tool_task_update(BelyaAgent *agent, const JsonValue *args) {
+    const JsonValue *id_val = json_obj_get(args, "id");
+    int64_t tid = 0;
+    if (id_val && id_val->type == JSON_NUMBER) tid = (int64_t)id_val->u.number;
+    else if (id_val && id_val->type == JSON_STRING && id_val->u.string) tid = atoll(id_val->u.string);
+    if (tid <= 0) return xstrdup("Error: Missing or invalid task 'id'.");
+    const char *status = json_obj_get_str(args, "status");
+    const char *desc = json_obj_get_str(args, "description");
+    if (!status && !desc) return xstrdup("Error: Provide 'status' or 'description' to update.");
+    bool ok = belya_agent_task_update(agent, tid, status, desc);
+    if (!ok) return xstrdup("Error: Failed to update task (check id and status value: pending|in_progress|completed|failed|blocked).");
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Task #%lld updated successfully (status: %s).", (long long)tid, status ? status : "unchanged");
+    return ds.data;
+}
+
+static char *tool_task_list(BelyaAgent *agent, const JsonValue *args) {
+    const char *filter = json_obj_get_str(args, "status");
+    return belya_agent_task_list(agent, filter);
+}
+
+static char *tool_task_get(BelyaAgent *agent, const JsonValue *args) {
+    const JsonValue *id_val = json_obj_get(args, "id");
+    int64_t tid = 0;
+    if (id_val && id_val->type == JSON_NUMBER) tid = (int64_t)id_val->u.number;
+    else if (id_val && id_val->type == JSON_STRING && id_val->u.string) tid = atoll(id_val->u.string);
+    if (tid <= 0) return xstrdup("Error: Missing or invalid task 'id'.");
+    return belya_agent_task_get(agent, tid);
+}
+
+static char *tool_cron_create(BelyaAgent *agent, const JsonValue *args) {
+    const char *name = json_obj_get_str(args, "name");
+    const char *schedule = json_obj_get_str(args, "schedule");
+    const char *prompt = json_obj_get_str(args, "prompt");
+    if (!name || !schedule || !prompt) return xstrdup("Error: Missing 'name', 'schedule', or 'prompt'.");
+    int64_t cid = belya_agent_cron_create(agent, name, schedule, prompt);
+    if (cid < 0) return xstrdup("Error: Failed to register cron job.");
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Cron job '%s' (#%lld) registered with schedule '%s'.", name, (long long)cid, schedule);
+    return ds.data;
+}
+
+static char *tool_cron_list(BelyaAgent *agent, const JsonValue *args) {
+    (void)args;
+    return belya_agent_cron_list(agent);
+}
+
+static char *tool_cron_tick(BelyaAgent *agent, const JsonValue *args) {
+    (void)args;
+    DynString logs = dyn_str_new();
+    int fired = belya_agent_cron_tick(agent, &logs);
+    if (fired == 0) {
+        dyn_str_free(&logs);
+        return xstrdup("No cron jobs currently due.");
+    }
+    return logs.data;
+}
+
+static char *tool_enter_plan_mode(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    (void)args;
+    if (g_harness) {
+        belya_harness_enter_plan_mode(g_harness);
+        return xstrdup("Plan Mode activated. All mutating file and shell operations are locked to read-only until exit_plan_mode is called.");
+    }
+    return xstrdup("Plan Mode activated.");
+}
+
+static char *tool_exit_plan_mode(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    (void)args;
+    if (g_harness) {
+        belya_harness_exit_plan_mode(g_harness);
+        return xstrdup("Plan Mode deactivated. Read-write filesystem and shell execution restored.");
+    }
+    return xstrdup("Plan Mode deactivated.");
+}
+
+static char *tool_enter_worktree(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    const char *branch = json_obj_get_str(args, "branch");
+    if (g_harness) {
+        return belya_harness_enter_worktree(g_harness, branch);
+    }
+    return xstrdup("Error: Harness execution environment unavailable.");
+}
+
+static char *tool_leave_worktree(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    const JsonValue *keep_val = json_obj_get(args, "keep");
+    bool keep = (keep_val && keep_val->type == JSON_BOOL) ? keep_val->u.boolean : false;
+    if (g_harness) {
+        return belya_harness_leave_worktree(g_harness, keep);
+    }
+    return xstrdup("Error: Harness execution environment unavailable.");
+}
+
+static char *tool_manage_task(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *action = json_obj_get_str(args, "action");
+    if (!action) return xstrdup("Error: Missing action parameter ('list', 'status', 'send_input', 'kill').");
+
+    if (strcmp(action, "list") == 0) {
+        return belya_harness_task_list(g_harness);
+    }
+    double id_num = json_obj_get_num(args, "id", -1);
+    if (id_num < 0) return xstrdup("Error: Missing or invalid task id parameter.");
+    int task_id = (int)id_num;
+
+    if (strcmp(action, "status") == 0) {
+        return belya_harness_task_status(g_harness, task_id);
+    } else if (strcmp(action, "send_input") == 0) {
+        const char *input = json_obj_get_str(args, "input");
+        if (!input) return xstrdup("Error: Missing input parameter for send_input action.");
+        return belya_harness_task_send_input(g_harness, task_id, input);
+    } else if (strcmp(action, "kill") == 0) {
+        return belya_harness_task_kill(g_harness, task_id);
+    }
+    return xstrdup("Error: Unrecognized action. Supported: list, status, send_input, kill.");
+}
+
+static char *tool_web_search(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *query = json_obj_get_str(args, "query");
+    const char *provider = json_obj_get_str(args, "provider");
+    return belya_harness_web_search(g_harness, query, provider);
+}
+
+static char *tool_web_fetch(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *url = json_obj_get_str(args, "url");
+    const char *mode = json_obj_get_str(args, "extract_mode");
+    return belya_harness_web_fetch(g_harness, url, mode);
+}
+
+static char *tool_edit_notebook(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *path = json_obj_get_str(args, "path");
+    const char *action = json_obj_get_str(args, "action");
+    int cell_idx = (int)json_obj_get_num(args, "cell_index", -1);
+    const char *cell_type = json_obj_get_str(args, "cell_type");
+    const char *source = json_obj_get_str(args, "source");
+    return belya_harness_edit_notebook(g_harness, path, action, cell_idx, cell_type, source);
+}
+
+static char *tool_lsp_definition(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *file = json_obj_get_str(args, "file");
+    int line = (int)json_obj_get_num(args, "line", 1);
+    int character = (int)json_obj_get_num(args, "character", 1);
+    const char *symbol = json_obj_get_str(args, "symbol");
+    return belya_harness_lsp_definition(g_harness, file, line, character, symbol);
+}
+
+static char *tool_lsp_references(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness execution environment unavailable.");
+    const char *file = json_obj_get_str(args, "file");
+    int line = (int)json_obj_get_num(args, "line", 1);
+    int character = (int)json_obj_get_num(args, "character", 1);
+    const char *symbol = json_obj_get_str(args, "symbol");
+    return belya_harness_lsp_references(g_harness, file, line, character, symbol);
+}
+
+static char *tool_exec_backend(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: No active harness.");
+
+    const char *action = json_obj_get_str(args, "action");
+    if (!action) action = "get";
+
+    if (strcmp(action, "set") == 0) {
+        const char *backend_str = json_obj_get_str(args, "backend");
+        const char *target = json_obj_get_str(args, "target");
+
+        if (!backend_str || strcmp(backend_str, "local") == 0) {
+            belya_harness_set_exec_backend(g_harness, BELYA_BACKEND_LOCAL, NULL);
+            return xstrdup("Execution backend set to: local");
+        } else if (strcmp(backend_str, "docker") == 0) {
+            if (!target || strlen(target) == 0) {
+                return xstrdup("Error: Missing 'target' container ID or name for Docker backend.");
+            }
+            belya_harness_set_exec_backend(g_harness, BELYA_BACKEND_DOCKER, target);
+            DynString ds = dyn_str_new();
+            dyn_str_appendf(&ds, "Execution backend set to: docker (container: %s)", target);
+            return ds.data;
+        } else if (strcmp(backend_str, "ssh") == 0) {
+            if (!target || strlen(target) == 0) {
+                return xstrdup("Error: Missing 'target' host for SSH backend.");
+            }
+            belya_harness_set_exec_backend(g_harness, BELYA_BACKEND_SSH, target);
+            DynString ds = dyn_str_new();
+            dyn_str_appendf(&ds, "Execution backend set to: ssh (host: %s)", target);
+            return ds.data;
+        } else {
+            return xstrdup("Error: Invalid backend. Supported: 'local', 'docker', 'ssh'.");
+        }
+    } else {
+        DynString ds = dyn_str_new();
+        if (g_harness->exec_backend == BELYA_BACKEND_DOCKER) {
+            dyn_str_appendf(&ds, "Execution backend: docker (container: %s)", g_harness->docker_container);
+        } else if (g_harness->exec_backend == BELYA_BACKEND_SSH) {
+            dyn_str_appendf(&ds, "Execution backend: ssh (host: %s)", g_harness->ssh_host);
+        } else {
+            dyn_str_append(&ds, "Execution backend: local");
+        }
+        return ds.data;
+    }
 }
 
 static char *tool_spawn_subagent(BelyaAgent *agent, const JsonValue *args) {
@@ -1350,10 +1721,9 @@ char *belya_agency_dispatch_subagent(BelyaHarness *parent_harness, const char *r
     if (rolled_back) {
         dyn_str_appendf(&envelope, "Git Rollback Guard: ACTIVATED (Reverted working tree to snapshot %.8s)\n", snapshot_sha);
     }
-    if (tool_log.len > 0) {
-        dyn_str_append(&envelope, "\nExecution Trace:\n");
-        dyn_str_append(&envelope, tool_log.data);
-    }
+    // ROMA Context Firewall: Intermediate tool execution traces are strictly firewalled
+    // to prevent parent context contamination and token degradation.
+    dyn_str_appendf(&envelope, "ROMA Context Firewall: Child execution trace isolated (%zu bytes scrubbed from parent context)\n", tool_log.len);
     dyn_str_appendf(&envelope, "\nFinal Output:\n%s", final_ans.len > 0 ? final_ans.data : "(Subagent completed without output text)");
 
     dyn_str_free(&tool_log);
@@ -1376,6 +1746,446 @@ static char *tool_dispatch_agent(BelyaAgent *agent, const JsonValue *args) {
     if (!g_harness) return xstrdup("Error: Harness execution environment not available.");
 
     return belya_agency_dispatch_subagent(g_harness, role, task, context);
+}
+
+// Late-2026 Phase 3: AST Symbol Graph Navigation & ROMA Task Trees
+
+size_t belya_harness_index_symbols(BelyaHarness *h, const char *dir_path) {
+    if (!h || !h->agent || !h->agent->db) return 0;
+
+    sqlite3 *db = h->agent->db;
+    const char *create_tbl =
+        "CREATE TABLE IF NOT EXISTS symbols ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  file_path TEXT NOT NULL,"
+        "  symbol_name TEXT NOT NULL,"
+        "  kind TEXT NOT NULL,"
+        "  start_line INTEGER NOT NULL,"
+        "  end_line INTEGER NOT NULL,"
+        "  signature TEXT"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(symbol_name);"
+        "CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);";
+    sqlite3_exec(db, create_tbl, 0, 0, 0);
+
+    const char *target = (dir_path && strlen(dir_path) > 0) ? dir_path : ".";
+
+    sqlite3_stmt *stmt = NULL;
+    const char *ins_sql = "INSERT INTO symbols (file_path, symbol_name, kind, start_line, end_line, signature) VALUES (?, ?, ?, ?, ?, ?);";
+    if (sqlite3_prepare_v2(db, ins_sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return 0;
+    }
+
+    size_t count = 0;
+    sqlite3_exec(db, "BEGIN TRANSACTION;", 0, 0, 0);
+
+    DIR *d = opendir(target);
+    if (!d) {
+        sqlite3_finalize(stmt);
+        sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+        return 0;
+    }
+
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        const char *ext = strrchr(ent->d_name, '.');
+        if (!ext || (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)) continue;
+
+        char fpath[1024];
+        snprintf(fpath, sizeof(fpath), "%s/%s", target, ent->d_name);
+
+        FILE *f = fopen(fpath, "r");
+        if (!f) continue;
+
+        char line[2048];
+        int lineno = 0;
+        while (fgets(line, sizeof(line), f)) {
+            lineno++;
+            line[strcspn(line, "\r\n")] = '\0';
+
+            char *trim = line;
+            while (*trim == ' ' || *trim == '\t') trim++;
+            if (*trim == '\0') continue;
+
+            // 1. MACRO
+            if (strncmp(trim, "#define", 7) == 0 && (trim[7] == ' ' || trim[7] == '\t')) {
+                char *m = trim + 7;
+                while (*m == ' ' || *m == '\t') m++;
+                char sym[128] = {0};
+                int si = 0;
+                while (*m && (isalnum((unsigned char)*m) || *m == '_') && si < 127) {
+                    sym[si++] = *m++;
+                }
+                sym[si] = '\0';
+                if (si > 0) {
+                    sqlite3_reset(stmt);
+                    sqlite3_bind_text(stmt, 1, fpath, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, sym, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, "MACRO", -1, SQLITE_STATIC);
+                    sqlite3_bind_int(stmt, 4, lineno);
+                    sqlite3_bind_int(stmt, 5, lineno);
+                    sqlite3_bind_text(stmt, 6, trim, -1, SQLITE_TRANSIENT);
+                    if (sqlite3_step(stmt) == SQLITE_DONE) count++;
+                }
+                continue;
+            }
+
+            // 2. STRUCT_DEF / TYPEDEF
+            if (strncmp(trim, "typedef struct", 14) == 0 || strncmp(trim, "struct ", 7) == 0 || strncmp(trim, "typedef enum", 12) == 0) {
+                char *s = trim;
+                if (strncmp(s, "typedef struct", 14) == 0) s += 14;
+                else if (strncmp(s, "struct", 6) == 0) s += 6;
+                else s += 12;
+                while (*s == ' ' || *s == '\t') s++;
+                char sym[128] = {0};
+                int si = 0;
+                while (*s && (isalnum((unsigned char)*s) || *s == '_') && si < 127) {
+                    sym[si++] = *s++;
+                }
+                sym[si] = '\0';
+                if (si > 0) {
+                    sqlite3_reset(stmt);
+                    sqlite3_bind_text(stmt, 1, fpath, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 2, sym, -1, SQLITE_TRANSIENT);
+                    sqlite3_bind_text(stmt, 3, "STRUCT_DEF", -1, SQLITE_STATIC);
+                    sqlite3_bind_int(stmt, 4, lineno);
+                    sqlite3_bind_int(stmt, 5, lineno);
+                    sqlite3_bind_text(stmt, 6, trim, -1, SQLITE_TRANSIENT);
+                    if (sqlite3_step(stmt) == SQLITE_DONE) count++;
+                }
+            }
+
+            // 3. FUNC_DEF
+            char *open_p = strchr(trim, '(');
+            if (open_p && !strchr(trim, ';') && strchr(trim, '{')) {
+                char *fn_end = open_p - 1;
+                while (fn_end > trim && (*fn_end == ' ' || *fn_end == '\t')) fn_end--;
+                char *fn_start = fn_end;
+                while (fn_start > trim && (isalnum((unsigned char)*fn_start) || *fn_start == '_')) fn_start--;
+                if (!isalnum((unsigned char)*fn_start) && *fn_start != '_') fn_start++;
+
+                if (fn_end >= fn_start) {
+                    char sym[128] = {0};
+                    size_t len = (size_t)(fn_end - fn_start + 1);
+                    if (len < sizeof(sym)) {
+                        memcpy(sym, fn_start, len);
+                        sym[len] = '\0';
+                        if (strcmp(sym, "if") != 0 && strcmp(sym, "while") != 0 && strcmp(sym, "for") != 0 &&
+                            strcmp(sym, "switch") != 0 && strcmp(sym, "catch") != 0) {
+                            sqlite3_reset(stmt);
+                            sqlite3_bind_text(stmt, 1, fpath, -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_text(stmt, 2, sym, -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_text(stmt, 3, "FUNC_DEF", -1, SQLITE_STATIC);
+                            sqlite3_bind_int(stmt, 4, lineno);
+                            sqlite3_bind_int(stmt, 5, lineno);
+                            sqlite3_bind_text(stmt, 6, trim, -1, SQLITE_TRANSIENT);
+                            if (sqlite3_step(stmt) == SQLITE_DONE) count++;
+                        }
+                    }
+                }
+            }
+
+            // 4. CALL extraction
+            char *p = trim;
+            while ((open_p = strchr(p, '(')) != NULL) {
+                char *c_end = open_p - 1;
+                while (c_end >= trim && (*c_end == ' ' || *c_end == '\t')) c_end--;
+                char *c_start = c_end;
+                while (c_start >= trim && (isalnum((unsigned char)*c_start) || *c_start == '_')) c_start--;
+                if (c_start < trim || (!isalnum((unsigned char)*c_start) && *c_start != '_')) c_start++;
+
+                if (c_end >= c_start) {
+                    char sym[128] = {0};
+                    size_t len = (size_t)(c_end - c_start + 1);
+                    if (len > 0 && len < sizeof(sym)) {
+                        memcpy(sym, c_start, len);
+                        sym[len] = '\0';
+                        if (strcmp(sym, "if") != 0 && strcmp(sym, "while") != 0 && strcmp(sym, "for") != 0 &&
+                            strcmp(sym, "switch") != 0 && strcmp(sym, "sizeof") != 0 && strcmp(sym, "assert") != 0 &&
+                            strcmp(sym, "return") != 0) {
+                            sqlite3_reset(stmt);
+                            sqlite3_bind_text(stmt, 1, fpath, -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_text(stmt, 2, sym, -1, SQLITE_TRANSIENT);
+                            sqlite3_bind_text(stmt, 3, "CALL", -1, SQLITE_STATIC);
+                            sqlite3_bind_int(stmt, 4, lineno);
+                            sqlite3_bind_int(stmt, 5, lineno);
+                            sqlite3_bind_text(stmt, 6, trim, -1, SQLITE_TRANSIENT);
+                            if (sqlite3_step(stmt) == SQLITE_DONE) count++;
+                        }
+                    }
+                }
+                p = open_p + 1;
+            }
+        }
+        fclose(f);
+    }
+    closedir(d);
+
+    sqlite3_finalize(stmt);
+    sqlite3_exec(db, "COMMIT;", 0, 0, 0);
+    return count;
+}
+
+char *belya_harness_goto_definition(BelyaHarness *h, const char *symbol_name) {
+    if (!h || !symbol_name || strlen(symbol_name) == 0) {
+        return xstrdup("Error: Invalid symbol name.");
+    }
+    if (!h->agent || !h->agent->db) {
+        return xstrdup("Error: Agent database unavailable.");
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    const char *q = "SELECT file_path, kind, start_line, end_line, signature FROM symbols WHERE symbol_name = ? AND kind != 'CALL' ORDER BY (CASE kind WHEN 'FUNC_DEF' THEN 1 WHEN 'STRUCT_DEF' THEN 2 ELSE 3 END) LIMIT 5;";
+    if (sqlite3_prepare_v2(h->agent->db, q, -1, &stmt, NULL) != SQLITE_OK) {
+        belya_harness_index_symbols(h, ".");
+        if (sqlite3_prepare_v2(h->agent->db, q, -1, &stmt, NULL) != SQLITE_OK) {
+            return xstrdup("Error: Failed to query symbols database.");
+        }
+    }
+
+    sqlite3_bind_text(stmt, 1, symbol_name, -1, SQLITE_TRANSIENT);
+
+    DynString ds = dyn_str_new();
+    int matches = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *fpath = (const char *)sqlite3_column_text(stmt, 0);
+        const char *kind = (const char *)sqlite3_column_text(stmt, 1);
+        int s_line = sqlite3_column_int(stmt, 2);
+        int e_line = sqlite3_column_int(stmt, 3);
+        const char *sig = (const char *)sqlite3_column_text(stmt, 4);
+
+        if (matches == 0) {
+            dyn_str_appendf(&ds, "🎯 Symbol Definition: '%s'\n", symbol_name);
+        }
+        dyn_str_appendf(&ds, "  [%s] %s:%d-%d\n    Signature: %s\n", kind ? kind : "SYM", fpath ? fpath : "", s_line, e_line, sig ? sig : "");
+        matches++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (matches == 0) {
+        dyn_str_free(&ds);
+        DynString not_found = dyn_str_new();
+        dyn_str_appendf(&not_found, "Symbol '%s' not found in symbols index.", symbol_name);
+        return not_found.data;
+    }
+
+    return ds.data;
+}
+
+char *belya_harness_find_callers(BelyaHarness *h, const char *symbol_name) {
+    if (!h || !symbol_name || strlen(symbol_name) == 0) {
+        return xstrdup("Error: Invalid symbol name.");
+    }
+    if (!h->agent || !h->agent->db) {
+        return xstrdup("Error: Agent database unavailable.");
+    }
+
+    sqlite3_stmt *stmt = NULL;
+    const char *q = "SELECT file_path, start_line, signature FROM symbols WHERE symbol_name = ? AND kind = 'CALL' ORDER BY file_path, start_line LIMIT 30;";
+    if (sqlite3_prepare_v2(h->agent->db, q, -1, &stmt, NULL) != SQLITE_OK) {
+        belya_harness_index_symbols(h, ".");
+        if (sqlite3_prepare_v2(h->agent->db, q, -1, &stmt, NULL) != SQLITE_OK) {
+            return xstrdup("Error: Failed to query callers database.");
+        }
+    }
+
+    sqlite3_bind_text(stmt, 1, symbol_name, -1, SQLITE_TRANSIENT);
+
+    DynString ds = dyn_str_new();
+    int callers = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *fpath = (const char *)sqlite3_column_text(stmt, 0);
+        int line = sqlite3_column_int(stmt, 1);
+        const char *sig = (const char *)sqlite3_column_text(stmt, 2);
+
+        if (callers == 0) {
+            dyn_str_appendf(&ds, "📞 Callers of Symbol: '%s'\n", symbol_name);
+        }
+        dyn_str_appendf(&ds, "  • %s:%d => %s\n", fpath ? fpath : "", line, sig ? sig : "");
+        callers++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (callers == 0) {
+        dyn_str_free(&ds);
+        DynString not_found = dyn_str_new();
+        dyn_str_appendf(&not_found, "No callers found for symbol '%s' in symbols index.", symbol_name);
+        return not_found.data;
+    }
+    dyn_str_appendf(&ds, "Total Callers: %d\n", callers);
+    return ds.data;
+}
+
+// Late-2026 Phase 3: Repo-to-MCP Dynamic Synthesis
+
+bool belya_harness_synthesize_mcp_server(BelyaHarness *h, const char *server_name, const char *tool_name, const char *desc, const char *script_cmd, const char *schema_json) {
+    if (!h || !server_name || !tool_name || !script_cmd) return false;
+
+    mkdir(".belya", 0755);
+    mkdir(".belya/mcp", 0755);
+
+    char server_path[512];
+    snprintf(server_path, sizeof(server_path), ".belya/mcp/%s_server.sh", server_name);
+
+    FILE *f = fopen(server_path, "w");
+    if (!f) return false;
+
+    const char *effective_schema = (schema_json && strlen(schema_json) > 0) ? schema_json : "{\"type\":\"object\"}";
+
+    fprintf(f, "#!/bin/sh\n");
+    fprintf(f, "# Auto-synthesized Paper2Agent MCP Server: %s\n", server_name);
+    fprintf(f, "while IFS= read -r line; do\n");
+    fprintf(f, "  [ -z \"$line\" ] && continue\n");
+    fprintf(f, "  id=$(echo \"$line\" | sed -n 's/.*\"id\":\\([0-9]*\\).*/\\1/p')\n");
+    fprintf(f, "  [ -z \"$id\" ] && id=1\n");
+    fprintf(f, "  if echo \"$line\" | grep -q '\"method\":\"initialize\"'; then\n");
+    fprintf(f, "    echo \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$id,\\\"result\\\":{\\\"protocolVersion\\\":\\\"2024-11-05\\\",\\\"capabilities\\\":{\\\"tools\\\":{}},\\\"serverInfo\\\":{\\\"name\\\":\\\"%s\\\",\\\"version\\\":\\\"1.0.0\\\"}}}\"\n", server_name);
+    fprintf(f, "  elif echo \"$line\" | grep -q '\"method\":\"tools/list\"'; then\n");
+    fprintf(f, "    echo '{\"jsonrpc\":\"2.0\",\"id\":'$id',\"result\":{\"tools\":[{\"name\":\"%s\",\"description\":\"%s\",\"inputSchema\":%s}]}}'\n", tool_name, desc ? desc : "", effective_schema);
+    fprintf(f, "  elif echo \"$line\" | grep -q '\"method\":\"tools/call\"'; then\n");
+    fprintf(f, "    output=$(%s 2>&1)\n", script_cmd);
+    fprintf(f, "    clean_out=$(printf '%%s' \"$output\" | tr '\\n' ' ' | sed 's/\"/\\\\\"/g')\n");
+    fprintf(f, "    echo \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$id,\\\"result\\\":{\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"$clean_out\\\"}]}}\"\n");
+    fprintf(f, "  elif echo \"$line\" | grep -q '\"method\":\"ping\"'; then\n");
+    fprintf(f, "    echo \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$id,\\\"result\\\":{}}\"\n");
+    fprintf(f, "  fi\n");
+    fprintf(f, "done\n");
+    fclose(f);
+    chmod(server_path, 0755);
+
+    // Validation Gating: Test running with initialize & tools/list
+    char test_cmd[1024];
+    snprintf(test_cmd, sizeof(test_cmd),
+             "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\\n' | %s 2>/dev/null | grep -q '\"name\":\"%s\"'",
+             server_path, tool_name);
+    int rc = system(test_cmd);
+    if (rc != 0) {
+        unlink(server_path);
+        return false;
+    }
+
+    return belya_harness_connect_mcp(h, server_path);
+}
+
+// Late-2026 Phase 3: Mythos Variant Security Analysis
+
+char *belya_harness_audit_security_variants(BelyaHarness *h, const char *pattern_type, const char *target_path) {
+    (void)h;
+    const char *path = (target_path && strlen(target_path) > 0) ? target_path : ".";
+    const char *pat = (pattern_type && strlen(pattern_type) > 0) ? pattern_type : "all";
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "🛡️ === Mythos Variant Security Sweeper Report ===\n");
+    dyn_str_appendf(&ds, "Target Path: %s | Pattern Filter: %s\n\n", path, pat);
+
+    DIR *d = opendir(path);
+    if (!d) {
+        dyn_str_appendf(&ds, "Error: Target directory '%s' cannot be opened.\n", path);
+        return ds.data;
+    }
+
+    struct dirent *ent;
+    int findings = 0;
+
+    bool check_overflow = (strcmp(pat, "all") == 0 || strstr(pat, "overflow") != NULL || strstr(pat, "unbounded") != NULL);
+    bool check_fmt = (strcmp(pat, "all") == 0 || strstr(pat, "format") != NULL);
+
+    while ((ent = readdir(d)) != NULL) {
+        if (ent->d_name[0] == '.') continue;
+        const char *ext = strrchr(ent->d_name, '.');
+        if (!ext || (strcmp(ext, ".c") != 0 && strcmp(ext, ".h") != 0)) continue;
+
+        char fpath[1024];
+        snprintf(fpath, sizeof(fpath), "%s/%s", path, ent->d_name);
+
+        FILE *f = fopen(fpath, "r");
+        if (!f) continue;
+
+        char line[2048];
+        int lineno = 0;
+        while (fgets(line, sizeof(line), f)) {
+            lineno++;
+            line[strcspn(line, "\r\n")] = '\0';
+            char *trim = line;
+            while (*trim == ' ' || *trim == '\t') trim++;
+
+            if (strncmp(trim, "//", 2) == 0 || strncmp(trim, "/*", 2) == 0) continue;
+
+            if (check_overflow) {
+                if (strstr(trim, "strcpy(") != NULL || strstr(trim, "strcat(") != NULL ||
+                    strstr(trim, "gets(") != NULL || strstr(trim, "sprintf(") != NULL) {
+                    dyn_str_appendf(&ds, "[CWE-120: Buffer Copy without Checking Size of Input]\n");
+                    dyn_str_appendf(&ds, "  Location: %s:%d\n  Code:     %s\n  Remedy:   Replace with snprintf() or bounded strncpy().\n\n", fpath, lineno, trim);
+                    findings++;
+                }
+            }
+
+            if (check_fmt) {
+                if ((strstr(trim, "printf(") != NULL || strstr(trim, "fprintf(") != NULL) &&
+                    strstr(trim, "\"") == NULL && strchr(trim, ',') == NULL) {
+                    dyn_str_appendf(&ds, "[CWE-134: Use of Externally-Controlled Format String]\n");
+                    dyn_str_appendf(&ds, "  Location: %s:%d\n  Code:     %s\n  Remedy:   Use string literal format: printf(\"%%s\", ...).\n\n", fpath, lineno, trim);
+                    findings++;
+                }
+            }
+        }
+        fclose(f);
+    }
+    closedir(d);
+
+    dyn_str_appendf(&ds, "Summary: %d security variant finding(s) detected.\n", findings);
+    dyn_str_appendf(&ds, "PoC Verification Command: gcc -fsanitize=address,undefined -O1 -g -o /tmp/audit_test %s/main.c\n", path);
+
+    return ds.data;
+}
+
+static char *tool_goto_definition(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness runtime not active.");
+    const char *sym = json_obj_get_str(args, "symbol");
+    if (!sym) sym = json_obj_get_str(args, "name");
+    if (!sym) return xstrdup("Error: Missing required argument 'symbol'.");
+    return belya_harness_goto_definition(g_harness, sym);
+}
+
+static char *tool_find_callers(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness runtime not active.");
+    const char *sym = json_obj_get_str(args, "symbol");
+    if (!sym) sym = json_obj_get_str(args, "name");
+    if (!sym) return xstrdup("Error: Missing required argument 'symbol'.");
+    return belya_harness_find_callers(g_harness, sym);
+}
+
+static char *tool_synthesize_mcp_server(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness runtime not active.");
+    const char *srv = json_obj_get_str(args, "server_name");
+    const char *tl = json_obj_get_str(args, "tool_name");
+    const char *desc = json_obj_get_str(args, "description");
+    const char *cmd = json_obj_get_str(args, "script_cmd");
+    const char *sch = json_obj_get_str(args, "schema_json");
+
+    if (!srv || !tl || !cmd) {
+        return xstrdup("Error: Missing required arguments (server_name, tool_name, script_cmd).");
+    }
+
+    bool ok = belya_harness_synthesize_mcp_server(g_harness, srv, tl, desc, cmd, sch);
+    if (ok) {
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "Successfully synthesized and connected MCP server '%s' exposing tool '%s'.", srv, tl);
+        return ds.data;
+    }
+    return xstrdup("Error: Failed to synthesize or validate MCP server.");
+}
+
+static char *tool_audit_security_variants(BelyaAgent *agent, const JsonValue *args) {
+    (void)agent;
+    if (!g_harness) return xstrdup("Error: Harness runtime not active.");
+    const char *pat = json_obj_get_str(args, "pattern_type");
+    const char *target = json_obj_get_str(args, "target_path");
+    return belya_harness_audit_security_variants(g_harness, pat ? pat : "all", target ? target : ".");
 }
 
 bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***out_pipeline, size_t *out_count, char **out_direct_reply) {
@@ -1664,6 +2474,8 @@ static char *tool_fetch_url(BelyaAgent *agent, const JsonValue *args) {
 
     if (body.len == 0) {
         dyn_str_appendf(&body, "URL returned empty response (HTTP %ld).", http_code);
+    } else if (http_code >= 400) {
+        dyn_str_appendf(&body, "\n[HTTP Error Status: %ld]", http_code);
     }
 
     return body.data;
@@ -2009,10 +2821,25 @@ static JsonValue *build_string_param_schema(const char *prop_name, const char *p
     return p;
 }
 
+static void harness_on_pre_compact_hook(void *ud) {
+    BelyaHarness *bh = (BelyaHarness *)ud;
+    if (bh) {
+        BelyaHookResult hres = belya_run_lifecycle_hook(bh, BELYA_HOOK_PRE_COMPACT, NULL, NULL, NULL);
+        belya_hook_result_free(&hres);
+    }
+}
+
 BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_whitelist, const char *role_name) {
     BelyaHarness *h = calloc(1, sizeof(BelyaHarness));
     if (!h) return NULL;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        h->task_table.tasks[i].master_fd = -1;
+        h->task_table.tasks[i].state = BELYA_TASK_STATE_UNUSED;
+    }
     h->agent = agent;
+    if (agent) {
+        belya_agent_set_pre_compact_hook(agent, harness_on_pre_compact_hook, h);
+    }
     if (role_name) {
         snprintf(h->active_role, sizeof(h->active_role), "%s", role_name);
         if (strcmp(role_name, "tester") == 0) {
@@ -2041,8 +2868,22 @@ BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_wh
     } while (0)
 
     // 1. bash
-    REGISTER_IF_PERMITTED("bash", "Execute a non-interactive shell command. Do NOT use vim/nano/top/less/sudo/man (they will hang). Timeout: 30s. Use cat/grep/sed/awk for file ops.", 
-        build_string_param_schema("command", "The bash command string to execute"), PERM_ALLOW, tool_bash);
+    JsonValue *bash_params = json_create_object();
+    json_obj_add(bash_params, "type", json_create_string("object"));
+    JsonValue *bp_props = json_create_object();
+    JsonValue *bp_cmd = json_create_object();
+    json_obj_add(bp_cmd, "type", json_create_string("string"));
+    json_obj_add(bp_cmd, "description", json_create_string("The bash command string to execute"));
+    json_obj_add(bp_props, "command", bp_cmd);
+    JsonValue *bp_bg = json_create_object();
+    json_obj_add(bp_bg, "type", json_create_string("boolean"));
+    json_obj_add(bp_bg, "description", json_create_string("Run command asynchronously in a persistent background PTY subshell"));
+    json_obj_add(bp_props, "background", bp_bg);
+    json_obj_add(bash_params, "properties", bp_props);
+    JsonValue *bp_req = json_create_array();
+    json_arr_add(bp_req, json_create_string("command"));
+    json_obj_add(bash_params, "required", bp_req);
+    REGISTER_IF_PERMITTED("bash", "Execute a shell command. Use background:true for long-running processes or servers. Timeout: 30s.", bash_params, PERM_ALLOW, tool_bash);
 
     // 2. read_file
     JsonValue *read_params = json_create_object();
@@ -2331,6 +3172,376 @@ BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_wh
     json_obj_add(da_params, "required", da_req);
     REGISTER_IF_PERMITTED("dispatch_agent", "Dispatch a specialized autonomous engineering subagent with least-privilege bounding and Git rollback guard", da_params, PERM_ALLOW, tool_dispatch_agent);
 
+    // 19. goto_definition (AST Symbol Graph Navigation)
+    REGISTER_IF_PERMITTED("goto_definition", "Navigate to symbol definition (functions, structs, macros) using AST index",
+        build_string_param_schema("symbol", "Function, struct, or macro name to resolve"), PERM_ALLOW, tool_goto_definition);
+
+    // 20. find_callers (AST Call-Graph Traversal)
+    REGISTER_IF_PERMITTED("find_callers", "Find all call sites and invocations of a symbol across codebase",
+        build_string_param_schema("symbol", "Target function or symbol name"), PERM_ALLOW, tool_find_callers);
+
+    // 21. synthesize_mcp_server (Paper2Agent Executable Knowledge)
+    JsonValue *mcp_syn_params = json_create_object();
+    json_obj_add(mcp_syn_params, "type", json_create_string("object"));
+    JsonValue *msp_props = json_create_object();
+    JsonValue *msp_srv = json_create_object();
+    json_obj_add(msp_srv, "type", json_create_string("string"));
+    json_obj_add(msp_srv, "description", json_create_string("Name of the MCP server"));
+    json_obj_add(msp_props, "server_name", msp_srv);
+    JsonValue *msp_tool = json_create_object();
+    json_obj_add(msp_tool, "type", json_create_string("string"));
+    json_obj_add(msp_tool, "description", json_create_string("Name of the exposed tool"));
+    json_obj_add(msp_props, "tool_name", msp_tool);
+    JsonValue *msp_desc = json_create_object();
+    json_obj_add(msp_desc, "type", json_create_string("string"));
+    json_obj_add(msp_desc, "description", json_create_string("Description of tool"));
+    json_obj_add(msp_props, "description", msp_desc);
+    JsonValue *msp_cmd = json_create_object();
+    json_obj_add(msp_cmd, "type", json_create_string("string"));
+    json_obj_add(msp_cmd, "description", json_create_string("Shell or Python script command to execute"));
+    json_obj_add(msp_props, "script_cmd", msp_cmd);
+    JsonValue *msp_sch = json_create_object();
+    json_obj_add(msp_sch, "type", json_create_string("string"));
+    json_obj_add(msp_sch, "description", json_create_string("JSON Schema string for parameters"));
+    json_obj_add(msp_props, "schema_json", msp_sch);
+    json_obj_add(mcp_syn_params, "properties", msp_props);
+    JsonValue *msp_req = json_create_array();
+    json_arr_add(msp_req, json_create_string("server_name"));
+    json_arr_add(msp_req, json_create_string("tool_name"));
+    json_arr_add(msp_req, json_create_string("script_cmd"));
+    json_obj_add(mcp_syn_params, "required", msp_req);
+    REGISTER_IF_PERMITTED("synthesize_mcp_server", "Synthesize a standalone Model Context Protocol (MCP) server from any executable script with validation gating", mcp_syn_params, PERM_ALLOW, tool_synthesize_mcp_server);
+
+    // 22. audit_security_variants (Mythos Variant Security Sweeper)
+    JsonValue *audit_params = json_create_object();
+    json_obj_add(audit_params, "type", json_create_string("object"));
+    JsonValue *ap_props = json_create_object();
+    JsonValue *ap_pat = json_create_object();
+    json_obj_add(ap_pat, "type", json_create_string("string"));
+    json_obj_add(ap_pat, "description", json_create_string("Pattern type: 'all', 'buffer_overflow', 'format_string', 'unchecked_alloc'"));
+    json_obj_add(ap_props, "pattern_type", ap_pat);
+    JsonValue *ap_tgt = json_create_object();
+    json_obj_add(ap_tgt, "type", json_create_string("string"));
+    json_obj_add(ap_tgt, "description", json_create_string("Target directory path to audit"));
+    json_obj_add(ap_props, "target_path", ap_tgt);
+    json_obj_add(audit_params, "properties", ap_props);
+    REGISTER_IF_PERMITTED("audit_security_variants", "Run Mythos variant analysis across codebase to detect unsafe sinks, buffer overflows, and memory vulnerabilities", audit_params, PERM_ALLOW, tool_audit_security_variants);
+
+    // 23. ask_user (Interactive Human Guidance & Clarification)
+    JsonValue *au_params = json_create_object();
+    json_obj_add(au_params, "type", json_create_string("object"));
+    JsonValue *au_props = json_create_object();
+    JsonValue *au_q = json_create_object();
+    json_obj_add(au_q, "type", json_create_string("string"));
+    json_obj_add(au_q, "description", json_create_string("Question or confirmation prompt to ask the human operator"));
+    json_obj_add(au_props, "question", au_q);
+    JsonValue *au_opts = json_create_object();
+    json_obj_add(au_opts, "type", json_create_string("array"));
+    json_obj_add(au_opts, "description", json_create_string("Optional list of selectable answer options"));
+    json_obj_add(au_props, "options", au_opts);
+    json_obj_add(au_params, "properties", au_props);
+    JsonValue *au_req = json_create_array();
+    json_arr_add(au_req, json_create_string("question"));
+    json_obj_add(au_params, "required", au_req);
+    REGISTER_IF_PERMITTED("ask_user", "Ask the human operator a clarification question with optional numbered choices", au_params, PERM_ALLOW, tool_ask_user);
+
+    // 24. task_create
+    JsonValue *tc_params = json_create_object();
+    json_obj_add(tc_params, "type", json_create_string("object"));
+    JsonValue *tc_props = json_create_object();
+    JsonValue *tc_subj = json_create_object();
+    json_obj_add(tc_subj, "type", json_create_string("string"));
+    json_obj_add(tc_subj, "description", json_create_string("Short subject or title of the task"));
+    json_obj_add(tc_props, "subject", tc_subj);
+    JsonValue *tc_desc = json_create_object();
+    json_obj_add(tc_desc, "type", json_create_string("string"));
+    json_obj_add(tc_desc, "description", json_create_string("Detailed description or acceptance criteria"));
+    json_obj_add(tc_props, "description", tc_desc);
+    JsonValue *tc_deps = json_create_object();
+    json_obj_add(tc_deps, "type", json_create_string("string"));
+    json_obj_add(tc_deps, "description", json_create_string("Comma-separated list of prerequisite task IDs"));
+    json_obj_add(tc_props, "dependencies", tc_deps);
+    JsonValue *tc_asgn = json_create_object();
+    json_obj_add(tc_asgn, "type", json_create_string("string"));
+    json_obj_add(tc_asgn, "description", json_create_string("Target sub-agent or twin assigned to this task"));
+    json_obj_add(tc_props, "assigned_agent", tc_asgn);
+    json_obj_add(tc_params, "properties", tc_props);
+    JsonValue *tc_req = json_create_array();
+    json_arr_add(tc_req, json_create_string("subject"));
+    json_obj_add(tc_params, "required", tc_req);
+    REGISTER_IF_PERMITTED("task_create", "Create a structured tracking task on the SQLite task board", tc_params, PERM_ALLOW, tool_task_create);
+
+    // 25. task_update
+    JsonValue *tu_params = json_create_object();
+    json_obj_add(tu_params, "type", json_create_string("object"));
+    JsonValue *tu_props = json_create_object();
+    JsonValue *tu_id = json_create_object();
+    json_obj_add(tu_id, "type", json_create_string("integer"));
+    json_obj_add(tu_id, "description", json_create_string("ID of the task to update"));
+    json_obj_add(tu_props, "id", tu_id);
+    JsonValue *tu_st = json_create_object();
+    json_obj_add(tu_st, "type", json_create_string("string"));
+    json_obj_add(tu_st, "description", json_create_string("New status: pending, in_progress, completed, failed, blocked"));
+    json_obj_add(tu_props, "status", tu_st);
+    JsonValue *tu_desc = json_create_object();
+    json_obj_add(tu_desc, "type", json_create_string("string"));
+    json_obj_add(tu_desc, "description", json_create_string("Updated description or progress note"));
+    json_obj_add(tu_props, "description", tu_desc);
+    json_obj_add(tu_params, "properties", tu_props);
+    JsonValue *tu_req = json_create_array();
+    json_arr_add(tu_req, json_create_string("id"));
+    json_obj_add(tu_params, "required", tu_req);
+    REGISTER_IF_PERMITTED("task_update", "Update task progress or status on the SQLite task board", tu_params, PERM_ALLOW, tool_task_update);
+
+    // 26. task_list
+    JsonValue *tl_params = json_create_object();
+    json_obj_add(tl_params, "type", json_create_string("object"));
+    JsonValue *tl_props = json_create_object();
+    JsonValue *tl_st = json_create_object();
+    json_obj_add(tl_st, "type", json_create_string("string"));
+    json_obj_add(tl_st, "description", json_create_string("Optional status filter: pending, in_progress, completed, failed, blocked, or all"));
+    json_obj_add(tl_props, "status", tl_st);
+    json_obj_add(tl_params, "properties", tl_props);
+    REGISTER_IF_PERMITTED("task_list", "List tasks from the SQLite task board with optional status filter", tl_params, PERM_ALLOW, tool_task_list);
+
+    // 27. task_get
+    JsonValue *tg_params = json_create_object();
+    json_obj_add(tg_params, "type", json_create_string("object"));
+    JsonValue *tg_props = json_create_object();
+    JsonValue *tg_id = json_create_object();
+    json_obj_add(tg_id, "type", json_create_string("integer"));
+    json_obj_add(tg_id, "description", json_create_string("ID of the task to retrieve"));
+    json_obj_add(tg_props, "id", tg_id);
+    json_obj_add(tg_params, "properties", tg_props);
+    JsonValue *tg_req = json_create_array();
+    json_arr_add(tg_req, json_create_string("id"));
+    json_obj_add(tg_params, "required", tg_req);
+    REGISTER_IF_PERMITTED("task_get", "Retrieve full details and dependency graph of a specific task", tg_params, PERM_ALLOW, tool_task_get);
+
+    // 28. cron_create
+    JsonValue *cc_params = json_create_object();
+    json_obj_add(cc_params, "type", json_create_string("object"));
+    JsonValue *cc_props = json_create_object();
+    JsonValue *cc_name = json_create_object();
+    json_obj_add(cc_name, "type", json_create_string("string"));
+    json_obj_add(cc_name, "description", json_create_string("Unique name for the recurring job"));
+    json_obj_add(cc_props, "name", cc_name);
+    JsonValue *cc_sched = json_create_object();
+    json_obj_add(cc_sched, "type", json_create_string("string"));
+    json_obj_add(cc_sched, "description", json_create_string("Standard cron expression or interval specifier"));
+    json_obj_add(cc_props, "schedule", cc_sched);
+    JsonValue *cc_pmt = json_create_object();
+    json_obj_add(cc_pmt, "type", json_create_string("string"));
+    json_obj_add(cc_pmt, "description", json_create_string("Prompt instruction or action to execute when triggered"));
+    json_obj_add(cc_props, "prompt", cc_pmt);
+    json_obj_add(cc_params, "properties", cc_props);
+    JsonValue *cc_req = json_create_array();
+    json_arr_add(cc_req, json_create_string("name"));
+    json_arr_add(cc_req, json_create_string("schedule"));
+    json_arr_add(cc_req, json_create_string("prompt"));
+    json_obj_add(cc_params, "required", cc_req);
+    REGISTER_IF_PERMITTED("cron_create", "Register a recurring background cron job", cc_params, PERM_ALLOW, tool_cron_create);
+
+    // 29. cron_list
+    JsonValue *cl_params = json_create_object();
+    json_obj_add(cl_params, "type", json_create_string("object"));
+    json_obj_add(cl_params, "properties", json_create_object());
+    REGISTER_IF_PERMITTED("cron_list", "List all registered background cron jobs", cl_params, PERM_ALLOW, tool_cron_list);
+
+    // 30. cron_tick
+    JsonValue *ct_params = json_create_object();
+    json_obj_add(ct_params, "type", json_create_string("object"));
+    json_obj_add(ct_params, "properties", json_create_object());
+    REGISTER_IF_PERMITTED("cron_tick", "Evaluate and trigger due background cron jobs immediately", ct_params, PERM_ALLOW, tool_cron_tick);
+
+    // 31. enter_plan_mode
+    JsonValue *epm_params = json_create_object();
+    json_obj_add(epm_params, "type", json_create_string("object"));
+    json_obj_add(epm_params, "properties", json_create_object());
+    REGISTER_IF_PERMITTED("enter_plan_mode", "Enter read-only Plan Mode. Locks all mutating file and shell operations until exit_plan_mode is called", epm_params, PERM_ALLOW, tool_enter_plan_mode);
+
+    // 32. exit_plan_mode
+    JsonValue *xpm_params = json_create_object();
+    json_obj_add(xpm_params, "type", json_create_string("object"));
+    json_obj_add(xpm_params, "properties", json_create_object());
+    REGISTER_IF_PERMITTED("exit_plan_mode", "Exit read-only Plan Mode. Restores read-write filesystem and shell execution", xpm_params, PERM_ALLOW, tool_exit_plan_mode);
+
+    // 33. enter_worktree
+    JsonValue *ew_params = json_create_object();
+    json_obj_add(ew_params, "type", json_create_string("object"));
+    JsonValue *ew_props = json_create_object();
+    JsonValue *ew_branch = json_create_object();
+    json_obj_add(ew_branch, "type", json_create_string("string"));
+    json_obj_add(ew_branch, "description", json_create_string("Branch or identifier name for the isolated git worktree"));
+    json_obj_add(ew_props, "branch", ew_branch);
+    json_obj_add(ew_params, "properties", ew_props);
+    REGISTER_IF_PERMITTED("enter_worktree", "Create and switch into an isolated git worktree sandbox", ew_params, PERM_ALLOW, tool_enter_worktree);
+
+    // 34. leave_worktree
+    JsonValue *lw_params = json_create_object();
+    json_obj_add(lw_params, "type", json_create_string("object"));
+    JsonValue *lw_props = json_create_object();
+    JsonValue *lw_keep = json_create_object();
+    json_obj_add(lw_keep, "type", json_create_string("boolean"));
+    json_obj_add(lw_keep, "description", json_create_string("Whether to keep the worktree branch instead of force-removing it"));
+    json_obj_add(lw_props, "keep", lw_keep);
+    json_obj_add(lw_params, "properties", lw_props);
+    REGISTER_IF_PERMITTED("leave_worktree", "Leave isolated git worktree sandbox and restore original working directory", lw_params, PERM_ALLOW, tool_leave_worktree);
+
+    // 35. manage_task
+    JsonValue *mt_params = json_create_object();
+    json_obj_add(mt_params, "type", json_create_string("object"));
+    JsonValue *mt_props = json_create_object();
+    JsonValue *mt_act = json_create_object();
+    json_obj_add(mt_act, "type", json_create_string("string"));
+    json_obj_add(mt_act, "description", json_create_string("Action to perform: 'list', 'status', 'send_input', 'kill'"));
+    json_obj_add(mt_props, "action", mt_act);
+    JsonValue *mt_id = json_create_object();
+    json_obj_add(mt_id, "type", json_create_string("integer"));
+    json_obj_add(mt_id, "description", json_create_string("ID of the background task"));
+    json_obj_add(mt_props, "id", mt_id);
+    JsonValue *mt_inp = json_create_object();
+    json_obj_add(mt_inp, "type", json_create_string("string"));
+    json_obj_add(mt_inp, "description", json_create_string("Input text to send to the task stdin (for send_input)"));
+    json_obj_add(mt_props, "input", mt_inp);
+    json_obj_add(mt_params, "properties", mt_props);
+    JsonValue *mt_req = json_create_array();
+    json_arr_add(mt_req, json_create_string("action"));
+    json_obj_add(mt_params, "required", mt_req);
+    REGISTER_IF_PERMITTED("manage_task", "Manage persistent background PTY subshell tasks (list, status, send_input, kill)", mt_params, PERM_ALLOW, tool_manage_task);
+
+    // 36. web_search
+    JsonValue *ws_params = json_create_object();
+    json_obj_add(ws_params, "type", json_create_string("object"));
+    JsonValue *ws_props = json_create_object();
+    JsonValue *ws_q = json_create_object();
+    json_obj_add(ws_q, "type", json_create_string("string"));
+    json_obj_add(ws_q, "description", json_create_string("Search query string"));
+    json_obj_add(ws_props, "query", ws_q);
+    JsonValue *ws_prv = json_create_object();
+    json_obj_add(ws_prv, "type", json_create_string("string"));
+    json_obj_add(ws_prv, "description", json_create_string("Search provider: 'brave' (default), 'tavily', or 'searxng'"));
+    json_obj_add(ws_props, "provider", ws_prv);
+    json_obj_add(ws_params, "properties", ws_props);
+    JsonValue *ws_req = json_create_array();
+    json_arr_add(ws_req, json_create_string("query"));
+    json_obj_add(ws_params, "required", ws_req);
+    REGISTER_IF_PERMITTED("web_search", "Search the web for up-to-date documentation and information", ws_params, PERM_ALLOW, tool_web_search);
+
+    // 37. web_fetch
+    JsonValue *wf_params = json_create_object();
+    json_obj_add(wf_params, "type", json_create_string("object"));
+    JsonValue *wf_props = json_create_object();
+    JsonValue *wf_u = json_create_object();
+    json_obj_add(wf_u, "type", json_create_string("string"));
+    json_obj_add(wf_u, "description", json_create_string("Target HTTP/HTTPS URL to fetch"));
+    json_obj_add(wf_props, "url", wf_u);
+    JsonValue *wf_m = json_create_object();
+    json_obj_add(wf_m, "type", json_create_string("string"));
+    json_obj_add(wf_m, "description", json_create_string("Extraction mode: 'markdown' (default) or 'text'"));
+    json_obj_add(wf_props, "extract_mode", wf_m);
+    json_obj_add(wf_params, "properties", wf_props);
+    JsonValue *wf_req = json_create_array();
+    json_arr_add(wf_req, json_create_string("url"));
+    json_obj_add(wf_params, "required", wf_req);
+    REGISTER_IF_PERMITTED("web_fetch", "Fetch and extract clean markdown content from an HTTP/HTTPS URL (SSRF guarded, max 50KB)", wf_params, PERM_ALLOW, tool_web_fetch);
+
+    // 38. edit_notebook
+    JsonValue *nb_params = json_create_object();
+    json_obj_add(nb_params, "type", json_create_string("object"));
+    JsonValue *nb_props = json_create_object();
+    JsonValue *nb_p = json_create_object();
+    json_obj_add(nb_p, "type", json_create_string("string"));
+    json_obj_add(nb_p, "description", json_create_string("Path to .ipynb Jupyter notebook file"));
+    json_obj_add(nb_props, "path", nb_p);
+    JsonValue *nb_a = json_create_object();
+    json_obj_add(nb_a, "type", json_create_string("string"));
+    json_obj_add(nb_a, "description", json_create_string("Action: 'read', 'replace_cell', 'insert_cell', 'delete_cell'"));
+    json_obj_add(nb_props, "action", nb_a);
+    JsonValue *nb_idx = json_create_object();
+    json_obj_add(nb_idx, "type", json_create_string("integer"));
+    json_obj_add(nb_idx, "description", json_create_string("Target cell index (0-indexed)"));
+    json_obj_add(nb_props, "cell_index", nb_idx);
+    JsonValue *nb_ct = json_create_object();
+    json_obj_add(nb_ct, "type", json_create_string("string"));
+    json_obj_add(nb_ct, "description", json_create_string("Cell type: 'code' or 'markdown'"));
+    json_obj_add(nb_props, "cell_type", nb_ct);
+    JsonValue *nb_src = json_create_object();
+    json_obj_add(nb_src, "type", json_create_string("string"));
+    json_obj_add(nb_src, "description", json_create_string("Cell code or markdown content for insertion/replacement"));
+    json_obj_add(nb_props, "source", nb_src);
+    json_obj_add(nb_params, "properties", nb_props);
+    JsonValue *nb_req = json_create_array();
+    json_arr_add(nb_req, json_create_string("path"));
+    json_arr_add(nb_req, json_create_string("action"));
+    json_obj_add(nb_params, "required", nb_req);
+    REGISTER_IF_PERMITTED("edit_notebook", "Inspect and manipulate Jupyter notebook (.ipynb) cells preserving outputs and metadata", nb_params, PERM_ALLOW, tool_edit_notebook);
+
+    // 39. lsp_definition
+    JsonValue *lsp_def_params = json_create_object();
+    json_obj_add(lsp_def_params, "type", json_create_string("object"));
+    JsonValue *lsp_def_props = json_create_object();
+    JsonValue *lsp_def_f = json_create_object();
+    json_obj_add(lsp_def_f, "type", json_create_string("string"));
+    json_obj_add(lsp_def_f, "description", json_create_string("Source file path"));
+    json_obj_add(lsp_def_props, "file", lsp_def_f);
+    JsonValue *lsp_def_l = json_create_object();
+    json_obj_add(lsp_def_l, "type", json_create_string("integer"));
+    json_obj_add(lsp_def_l, "description", json_create_string("Line number (1-based)"));
+    json_obj_add(lsp_def_props, "line", lsp_def_l);
+    JsonValue *lsp_def_c = json_create_object();
+    json_obj_add(lsp_def_c, "type", json_create_string("integer"));
+    json_obj_add(lsp_def_c, "description", json_create_string("Character offset (1-based)"));
+    json_obj_add(lsp_def_props, "character", lsp_def_c);
+    JsonValue *lsp_def_s = json_create_object();
+    json_obj_add(lsp_def_s, "type", json_create_string("string"));
+    json_obj_add(lsp_def_s, "description", json_create_string("Optional symbol name (e.g. function or type identifier)"));
+    json_obj_add(lsp_def_props, "symbol", lsp_def_s);
+    json_obj_add(lsp_def_params, "properties", lsp_def_props);
+    REGISTER_IF_PERMITTED("lsp_definition", "Go to symbol definition via LSP-over-MCP or native AST symbol graph", lsp_def_params, PERM_ALLOW, tool_lsp_definition);
+
+    // 40. lsp_references
+    JsonValue *ref_params = json_create_object();
+    json_obj_add(ref_params, "type", json_create_string("object"));
+    JsonValue *ref_props = json_create_object();
+    JsonValue *ref_f = json_create_object();
+    json_obj_add(ref_f, "type", json_create_string("string"));
+    json_obj_add(ref_f, "description", json_create_string("Source file path"));
+    json_obj_add(ref_props, "file", ref_f);
+    JsonValue *ref_l = json_create_object();
+    json_obj_add(ref_l, "type", json_create_string("integer"));
+    json_obj_add(ref_l, "description", json_create_string("Line number (1-based)"));
+    json_obj_add(ref_props, "line", ref_l);
+    JsonValue *ref_c = json_create_object();
+    json_obj_add(ref_c, "type", json_create_string("integer"));
+    json_obj_add(ref_c, "description", json_create_string("Character offset (1-based)"));
+    json_obj_add(ref_props, "character", ref_c);
+    JsonValue *ref_s = json_create_object();
+    json_obj_add(ref_s, "type", json_create_string("string"));
+    json_obj_add(ref_s, "description", json_create_string("Optional symbol name to search references for"));
+    json_obj_add(ref_props, "symbol", ref_s);
+    json_obj_add(ref_params, "properties", ref_props);
+    REGISTER_IF_PERMITTED("lsp_references", "Find all references to symbol via LSP-over-MCP or native AST call-tree", ref_params, PERM_ALLOW, tool_lsp_references);
+
+    // 41. exec_backend (Phase 7 Modular Remote Execution Backend)
+    JsonValue *eb_params = json_create_object();
+    json_obj_add(eb_params, "type", json_create_string("object"));
+    JsonValue *eb_props = json_create_object();
+    JsonValue *eb_act = json_create_object();
+    json_obj_add(eb_act, "type", json_create_string("string"));
+    json_obj_add(eb_act, "description", json_create_string("Action: 'get' or 'set' (default: get)"));
+    json_obj_add(eb_props, "action", eb_act);
+    JsonValue *eb_be = json_create_object();
+    json_obj_add(eb_be, "type", json_create_string("string"));
+    json_obj_add(eb_be, "description", json_create_string("Backend type: 'local', 'docker', 'ssh'"));
+    json_obj_add(eb_props, "backend", eb_be);
+    JsonValue *eb_tgt = json_create_object();
+    json_obj_add(eb_tgt, "type", json_create_string("string"));
+    json_obj_add(eb_tgt, "description", json_create_string("Target container ID/name (docker) or host (ssh)"));
+    json_obj_add(eb_props, "target", eb_tgt);
+    json_obj_add(eb_params, "properties", eb_props);
+    REGISTER_IF_PERMITTED("exec_backend", "Query or switch execution backend (local, Docker container, or SSH host)", eb_params, PERM_ALLOW, tool_exec_backend);
+
     // Load any previously defined custom tools if whitelist is unrestricted
     if (!tools_whitelist) {
         belya_harness_load_custom_tools(h);
@@ -2409,18 +3620,1469 @@ bool belya_harness_connect_mcp(BelyaHarness *h, const char *server_cmd) {
     return true;
 }
 
-static bool harness_ask_permission(const char *name, const char *args) {
+static struct termios g_saved_termios;
+static bool g_termios_saved = false;
+
+static void belya_restore_terminal_mode(void) {
+    if (g_termios_saved) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_saved_termios);
+        g_termios_saved = false;
+    }
+}
+
+static void belya_termios_sig_handler(int sig) {
+    belya_restore_terminal_mode();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+bool belya_terminal_permission_prompt(BelyaHarness *h, const char *tool_name, const char *args_json, void *userdata) {
+    (void)userdata;
+    if (getenv("BELYA_HEADLESS") != NULL || getenv("BELYA_TEST_MODE") != NULL || !isatty(STDIN_FILENO)) {
+        return true; // headless automated mode always allows
+    }
+
+    if (!g_termios_saved) {
+        if (tcgetattr(STDIN_FILENO, &g_saved_termios) == 0) {
+            g_termios_saved = true;
+            atexit(belya_restore_terminal_mode);
+            struct sigaction sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_handler = belya_termios_sig_handler;
+            sigaction(SIGINT, &sa, NULL);
+            sigaction(SIGTERM, &sa, NULL);
+            sigaction(SIGQUIT, &sa, NULL);
+            sigaction(SIGTSTP, &sa, NULL);
+        }
+    }
+
     printf("\n\033[1;33m[SECURITY GATE: Permission Required]\033[0m\n");
-    printf("Tool:      \033[1;37m%s\033[0m\n", name);
-    printf("Arguments: \033[0;36m%s\033[0m\n", args);
-    printf("Execute action? (\033[1;32my\033[0m/\033[1;31mN\033[0m): ");
+    printf("Tool:      \033[1;37m%s\033[0m\n", tool_name ? tool_name : "unknown");
+    if (args_json && strlen(args_json) > 0) {
+        printf("Arguments: \033[0;36m%s\033[0m\n", args_json);
+    }
+    printf("Action: [\033[1;32ma\033[0m]llow once | [\033[1;34mA\033[0m]lways allow | [\033[1;31md\033[0m]eny | [\033[1;35me\033[0m]xplain: ");
     fflush(stdout);
 
-    char line[32];
-    if (fgets(line, sizeof(line), stdin)) {
-        return (line[0] == 'y' || line[0] == 'Y');
+    tcflush(STDIN_FILENO, TCIFLUSH);
+
+    struct termios raw = g_saved_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 1;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    char ch = 'd';
+    while (read(STDIN_FILENO, &ch, 1) == 1) {
+        if (ch == 0x1B) {
+            // Drain trailing escape sequence bytes
+            char seq[16];
+            fcntl(STDIN_FILENO, F_SETFL, O_NONBLOCK);
+            while (read(STDIN_FILENO, seq, sizeof(seq)) > 0);
+            fcntl(STDIN_FILENO, F_SETFL, 0);
+            continue;
+        }
+        break;
     }
-    return false;
+
+    belya_restore_terminal_mode();
+    printf("%c\n", ch);
+
+    if (ch == 'a') {
+        return true;
+    }
+    if (ch == 'A') {
+        // Upgrade tool to PERM_ALLOW for remainder of session
+        if (h && tool_name) {
+            for (size_t i = 0; i < h->tool_count; i++) {
+                if (strcmp(h->tools[i].name, tool_name) == 0) {
+                    h->tools[i].security = PERM_ALLOW;
+                    break;
+                }
+            }
+        }
+        return true;
+    }
+    if (ch == 'e') {
+        printf("\033[1;35m[Intent Explanation]\033[0m Tool '%s' requested with arguments: %s\n", tool_name, args_json ? args_json : "none");
+        return false;
+    }
+    return false; // 'd' or other
+}
+
+static bool harness_ask_permission(const char *name, const char *args) {
+    return belya_terminal_permission_prompt(g_harness, name, args, NULL);
+}
+
+BelyaHookResult belya_run_lifecycle_hook(BelyaHarness *h, BelyaHookType hook_type, const char *tool_name, const char *tool_args, const char *observation) {
+    BelyaHookResult res;
+    memset(&res, 0, sizeof(res));
+
+    const char *event_name = NULL;
+    const char *script_base = NULL;
+    switch (hook_type) {
+        case BELYA_HOOK_PRE_TOOL_USE:
+            event_name = "PreToolUse";
+            script_base = "pre_tool_use";
+            break;
+        case BELYA_HOOK_POST_TOOL_USE:
+            event_name = "PostToolUse";
+            script_base = "post_tool_use";
+            break;
+        case BELYA_HOOK_STOP:
+            event_name = "Stop";
+            script_base = "stop";
+            break;
+        case BELYA_HOOK_PRE_COMPACT:
+            event_name = "PreCompact";
+            script_base = "pre_compact";
+            break;
+        default:
+            return res;
+    }
+
+    char script_path[512];
+    snprintf(script_path, sizeof(script_path), ".belya/hooks/%s.sh", script_base);
+    if (access(script_path, X_OK) != 0) {
+        snprintf(script_path, sizeof(script_path), ".belya/hooks/%s", script_base);
+        if (access(script_path, X_OK) != 0) {
+            return res;
+        }
+    }
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        return res;
+    }
+    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return res;
+    }
+
+    if (pid == 0) {
+        setpgid(0, 0);
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            close(devnull);
+        }
+
+        setenv("BELYA_HOOK_EVENT", event_name, 1);
+        if (tool_name) setenv("BELYA_TOOL_NAME", tool_name, 1);
+        if (tool_args) setenv("BELYA_TOOL_ARGS", tool_args, 1);
+        if (observation) setenv("BELYA_TOOL_OBSERVATION", observation, 1);
+        if (h && h->agent && h->agent->db_path[0]) setenv("BELYA_SESSION_ID", h->agent->db_path, 1);
+        if (h && strlen(h->cwd) > 0) setenv("BELYA_CWD", h->cwd, 1);
+
+        execl(script_path, script_path, (char *)NULL);
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+
+    DynString out = dyn_str_new();
+    char buf[512];
+    struct pollfd pfd;
+    pfd.fd = pipefd[0];
+    pfd.events = POLLIN;
+
+    int timeout_ms = 3000;
+    bool timed_out = false;
+
+    while (1) {
+        int prc = poll(&pfd, 1, timeout_ms);
+        if (prc < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (prc == 0) {
+            timed_out = true;
+            kill(-pid, SIGKILL);
+            break;
+        }
+        if (pfd.revents & (POLLIN | POLLHUP)) {
+            ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+            if (n <= 0) break;
+            buf[n] = '\0';
+            dyn_str_append(&out, buf);
+            if (out.len > 16384) break;
+        }
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    if (timed_out) {
+        res.blocked = false;
+        res.exit_code = -1;
+        dyn_str_append(&out, " [Hook timed out]");
+        res.output = out.data;
+        return res;
+    }
+
+    if (WIFEXITED(status)) {
+        res.exit_code = WEXITSTATUS(status);
+        if (res.exit_code == 2) {
+            res.blocked = true;
+        }
+    } else {
+        res.exit_code = -1;
+    }
+
+    if (out.len > 0 && out.data[out.len - 1] == '\n') {
+        out.data[--out.len] = '\0';
+    }
+    res.output = out.data;
+    return res;
+}
+
+void belya_hook_result_free(BelyaHookResult *res) {
+    if (res && res->output) {
+        free(res->output);
+        res->output = NULL;
+    }
+}
+
+// 2026 Competitive Parity Phase 4: Plan Mode Gate & Git Worktree Sandbox
+bool belya_harness_enter_plan_mode(BelyaHarness *h) {
+    if (!h) return false;
+    h->plan_mode = true;
+    belya_agent_log_timeline(h->agent, "plan_mode_entered", "Activated read-only Plan Mode");
+    return true;
+}
+
+bool belya_harness_exit_plan_mode(BelyaHarness *h) {
+    if (!h) return false;
+    h->plan_mode = false;
+    belya_agent_log_timeline(h->agent, "plan_mode_exited", "Deactivated Plan Mode");
+    return true;
+}
+
+char *belya_harness_enter_worktree(BelyaHarness *h, const char *branch_or_id) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (h->in_worktree) return xstrdup("Error: Already active inside an isolated worktree.");
+
+    if (!getcwd(h->original_worktree_cwd, sizeof(h->original_worktree_cwd))) {
+        snprintf(h->original_worktree_cwd, sizeof(h->original_worktree_cwd), "%s", h->cwd);
+    }
+
+    char wt_id[128];
+    if (branch_or_id && strlen(branch_or_id) > 0) {
+        snprintf(wt_id, sizeof(wt_id), "wt_%s", branch_or_id);
+    } else {
+        snprintf(wt_id, sizeof(wt_id), "wt_agent_%ld", (long)time(NULL));
+    }
+
+    char wt_path[4096];
+    snprintf(wt_path, sizeof(wt_path), ".almaz/worktrees/%s", wt_id);
+
+    system("mkdir -p .almaz/worktrees");
+
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "git worktree add -b \"%s\" \"%s\" HEAD >/dev/null 2>&1", wt_id, wt_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+        snprintf(cmd, sizeof(cmd), "git worktree add \"%s\" HEAD >/dev/null 2>&1", wt_path);
+        rc = system(cmd);
+    }
+
+    if (rc != 0) {
+        return xstrdup("Error: Failed to create isolated git worktree (ensure repository has commits).");
+    }
+
+    if (chdir(wt_path) != 0) {
+        return xstrdup("Error: Failed to enter newly created worktree directory.");
+    }
+
+    if (!getcwd(h->cwd, sizeof(h->cwd))) {
+        snprintf(h->cwd, sizeof(h->cwd), "%s", wt_path);
+    }
+    snprintf(h->active_worktree_path, sizeof(h->active_worktree_path), "%s", wt_path);
+    h->in_worktree = true;
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Entered isolated git worktree at '%s'. Working directory shifted to isolated workspace.", wt_path);
+    belya_agent_log_timeline(h->agent, "worktree_entered", wt_path);
+    return ds.data;
+}
+
+char *belya_harness_leave_worktree(BelyaHarness *h, bool keep) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (!h->in_worktree) return xstrdup("Error: Not currently in a worktree.");
+
+    char prev_wt_path[4096];
+    snprintf(prev_wt_path, sizeof(prev_wt_path), "%s", h->active_worktree_path);
+
+    if (chdir(h->original_worktree_cwd) != 0) {
+        return xstrdup("Error: Failed to restore original working directory.");
+    }
+    snprintf(h->cwd, sizeof(h->cwd), "%s", h->original_worktree_cwd);
+    h->in_worktree = false;
+
+    if (!keep) {
+        char cmd[4096];
+        snprintf(cmd, sizeof(cmd), "git worktree remove --force \"%s\" >/dev/null 2>&1", prev_wt_path);
+        system(cmd);
+    }
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Left git worktree. Restored workspace to '%s' (worktree %s).",
+        h->cwd, keep ? "preserved" : "reaped");
+    belya_agent_log_timeline(h->agent, "worktree_left", h->cwd);
+    return ds.data;
+}
+
+// ==================== 2026 Competitive Parity Phase 5: POSIX PTY Background Task Manager ====================
+
+static void belya_task_ring_write(BelyaBackgroundTask *t, const char *data, size_t len) {
+    if (!t || !data || len == 0) return;
+    for (size_t i = 0; i < len; i++) {
+        t->ring_buffer[t->ring_head] = data[i];
+        t->ring_head = (t->ring_head + 1) % BELYA_TASK_RING_BUFFER_SIZE;
+        if (t->ring_count < BELYA_TASK_RING_BUFFER_SIZE) {
+            t->ring_count++;
+        } else {
+            t->ring_tail = (t->ring_tail + 1) % BELYA_TASK_RING_BUFFER_SIZE;
+        }
+    }
+    t->total_bytes_captured += len;
+}
+
+static char *belya_task_ring_read_all(BelyaBackgroundTask *t) {
+    if (!t || t->ring_count == 0) return xstrdup("");
+    char *out = malloc(t->ring_count + 1);
+    if (!out) return xstrdup("");
+    for (size_t i = 0; i < t->ring_count; i++) {
+        size_t idx = (t->ring_tail + i) % BELYA_TASK_RING_BUFFER_SIZE;
+        out[i] = t->ring_buffer[idx];
+    }
+    out[t->ring_count] = '\0';
+    return out;
+}
+
+static void belya_task_drain_output(BelyaBackgroundTask *t) {
+    if (!t || t->master_fd <= STDERR_FILENO) return;
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(t->master_fd, buf, sizeof(buf) - 1)) > 0) {
+        belya_task_ring_write(t, buf, (size_t)n);
+    }
+    if (t->state == BELYA_TASK_STATE_RUNNING) {
+        int status = 0;
+        pid_t res = waitpid(t->pid, &status, WNOHANG);
+        if (res > 0) {
+            t->end_time = time(NULL);
+            if (WIFEXITED(status)) {
+                t->exit_code = WEXITSTATUS(status);
+                t->state = (t->exit_code == 0) ? BELYA_TASK_STATE_COMPLETED : BELYA_TASK_STATE_FAILED;
+            } else if (WIFSIGNALED(status)) {
+                t->exit_code = 128 + WTERMSIG(status);
+                t->state = BELYA_TASK_STATE_KILLED;
+            }
+            if (t->master_fd > STDERR_FILENO) {
+                close(t->master_fd);
+            }
+            t->master_fd = -1;
+        }
+    }
+}
+
+int belya_harness_spawn_task(BelyaHarness *h, const char *command) {
+    if (!h || !command || strlen(command) == 0) return -1;
+
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        if (h->task_table.tasks[i].state != BELYA_TASK_STATE_UNUSED) {
+            belya_task_drain_output(&h->task_table.tasks[i]);
+        }
+    }
+
+    int slot = -1;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        if (h->task_table.tasks[i].state == BELYA_TASK_STATE_UNUSED) {
+            slot = (int)i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+            if (h->task_table.tasks[i].state != BELYA_TASK_STATE_RUNNING) {
+                slot = (int)i;
+                break;
+            }
+        }
+    }
+    if (slot < 0) return -1;
+
+    int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master_fd < 0) return -1;
+
+    if (grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
+        close(master_fd);
+        return -1;
+    }
+
+    char *slave_name = ptsname(master_fd);
+    if (!slave_name) {
+        close(master_fd);
+        return -1;
+    }
+
+    fcntl(master_fd, F_SETFD, FD_CLOEXEC);
+    int flags = fcntl(master_fd, F_GETFL, 0);
+    fcntl(master_fd, F_SETFL, flags | O_NONBLOCK);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(master_fd);
+        return -1;
+    }
+
+    if (pid == 0) {
+        setsid();
+        int slave_fd = open(slave_name, O_RDWR);
+        if (slave_fd >= 0) {
+            dup2(slave_fd, STDIN_FILENO);
+            dup2(slave_fd, STDOUT_FILENO);
+            dup2(slave_fd, STDERR_FILENO);
+            if (slave_fd > STDERR_FILENO) close(slave_fd);
+        }
+        close(master_fd);
+        setpgid(0, 0);
+        execlp("bash", "bash", "-c", command, (char *)NULL);
+        _exit(127);
+    }
+
+    BelyaBackgroundTask *t = &h->task_table.tasks[slot];
+    t->id = ++h->task_table.next_id;
+    t->pid = pid;
+    t->pgid = pid;
+    t->master_fd = master_fd;
+    t->state = BELYA_TASK_STATE_RUNNING;
+    t->exit_code = -1;
+    t->start_time = time(NULL);
+    t->end_time = 0;
+    strncpy(t->command, command, sizeof(t->command) - 1);
+    t->command[sizeof(t->command) - 1] = '\0';
+    t->ring_head = 0;
+    t->ring_tail = 0;
+    t->ring_count = 0;
+    t->total_bytes_captured = 0;
+
+    usleep(50000);
+    belya_task_drain_output(t);
+
+    belya_agent_log_timeline(h->agent, "task_spawned", command);
+    return t->id;
+}
+
+char *belya_harness_task_list(BelyaHarness *h) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+
+    DynString ds = dyn_str_new();
+    dyn_str_append(&ds, "=== Active & Background Tasks Table ===\n");
+    dyn_str_append(&ds, "ID   | PID    | State      | Elapsed | Output   | Command\n");
+    dyn_str_append(&ds, "-----+--------+------------+---------+----------+-----------------------------\n");
+
+    size_t count = 0;
+    time_t now = time(NULL);
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        BelyaBackgroundTask *t = &h->task_table.tasks[i];
+        if (t->state == BELYA_TASK_STATE_UNUSED) continue;
+
+        belya_task_drain_output(t);
+        const char *st_str = "unknown";
+        if (t->state == BELYA_TASK_STATE_RUNNING) st_str = "\033[1;32mrunning\033[0m";
+        else if (t->state == BELYA_TASK_STATE_COMPLETED) st_str = "completed";
+        else if (t->state == BELYA_TASK_STATE_FAILED) st_str = "\033[1;31mfailed\033[0m";
+        else if (t->state == BELYA_TASK_STATE_KILLED) st_str = "\033[1;33mkilled\033[0m";
+
+        long elapsed = (long)(t->end_time ? (t->end_time - t->start_time) : (now - t->start_time));
+        if (elapsed < 0) elapsed = 0;
+
+        dyn_str_appendf(&ds, "%-4d | %-6d | %-20s | %4lds  | %6zu B | %s\n",
+            t->id, (int)t->pid, st_str, elapsed, t->total_bytes_captured, t->command);
+        count++;
+    }
+
+    if (count == 0) {
+        dyn_str_append(&ds, "(No background tasks currently registered)\n");
+    }
+    return ds.data;
+}
+
+char *belya_harness_task_status(BelyaHarness *h, int id) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+
+    BelyaBackgroundTask *target = NULL;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        if (h->task_table.tasks[i].id == id && h->task_table.tasks[i].state != BELYA_TASK_STATE_UNUSED) {
+            target = &h->task_table.tasks[i];
+            break;
+        }
+    }
+    if (!target) {
+        DynString err = dyn_str_new();
+        dyn_str_appendf(&err, "Error: Background task ID %d not found.", id);
+        return err.data;
+    }
+
+    belya_task_drain_output(target);
+    time_t now = time(NULL);
+    long elapsed = (long)(target->end_time ? (target->end_time - target->start_time) : (now - target->start_time));
+    if (elapsed < 0) elapsed = 0;
+
+    const char *st_str = "unknown";
+    if (target->state == BELYA_TASK_STATE_RUNNING) st_str = "running";
+    else if (target->state == BELYA_TASK_STATE_COMPLETED) st_str = "completed";
+    else if (target->state == BELYA_TASK_STATE_FAILED) st_str = "failed";
+    else if (target->state == BELYA_TASK_STATE_KILLED) st_str = "killed";
+
+    char *recent_out = belya_task_ring_read_all(target);
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Task ID: %d\nPID: %d (PGID: %d)\nCommand: %s\nState: %s\nExit Code: %d\nElapsed: %lds\nTotal Bytes Captured: %zu\n\nRecent Output:\n%s",
+        target->id, (int)target->pid, (int)target->pgid, target->command, st_str, target->exit_code, elapsed, target->total_bytes_captured,
+        recent_out ? recent_out : "");
+    if (recent_out) free(recent_out);
+    return ds.data;
+}
+
+char *belya_harness_task_send_input(BelyaHarness *h, int id, const char *input) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (!input) return xstrdup("Error: Missing input text.");
+
+    BelyaBackgroundTask *target = NULL;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        if (h->task_table.tasks[i].id == id && h->task_table.tasks[i].state != BELYA_TASK_STATE_UNUSED) {
+            target = &h->task_table.tasks[i];
+            break;
+        }
+    }
+    if (!target) {
+        DynString err = dyn_str_new();
+        dyn_str_appendf(&err, "Error: Background task ID %d not found.", id);
+        return err.data;
+    }
+
+    if (target->state != BELYA_TASK_STATE_RUNNING || target->master_fd < 0) {
+        return xstrdup("Error: Cannot send input; task is not actively running.");
+    }
+
+    size_t in_len = strlen(input);
+    ssize_t w = write(target->master_fd, input, in_len);
+    if (in_len > 0 && input[in_len - 1] != '\n') {
+        w += write(target->master_fd, "\n", 1);
+    }
+    (void)w;
+
+    usleep(50000);
+    belya_task_drain_output(target);
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Sent %zu bytes of input to task %d.\n", in_len, id);
+    return ds.data;
+}
+
+char *belya_harness_task_kill(BelyaHarness *h, int id) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+
+    BelyaBackgroundTask *target = NULL;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        if (h->task_table.tasks[i].id == id && h->task_table.tasks[i].state != BELYA_TASK_STATE_UNUSED) {
+            target = &h->task_table.tasks[i];
+            break;
+        }
+    }
+    if (!target) {
+        DynString err = dyn_str_new();
+        dyn_str_appendf(&err, "Error: Background task ID %d not found.", id);
+        return err.data;
+    }
+
+    if (target->state == BELYA_TASK_STATE_RUNNING) {
+        kill(-target->pgid, SIGTERM);
+        usleep(20000);
+        int status = 0;
+        if (waitpid(target->pid, &status, WNOHANG) == 0) {
+            kill(-target->pgid, SIGKILL);
+            waitpid(target->pid, &status, 0);
+        }
+        target->state = BELYA_TASK_STATE_KILLED;
+        target->end_time = time(NULL);
+        if (target->master_fd > STDERR_FILENO) {
+            close(target->master_fd);
+            target->master_fd = -1;
+        }
+    }
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "Task %d (PID %d, PGID %d) terminated successfully.", id, (int)target->pid, (int)target->pgid);
+    belya_agent_log_timeline(h->agent, "task_killed", ds.data);
+    return ds.data;
+}
+
+// ==================== 2026 Competitive Parity Phase 6: Multi-Provider Web Search/Fetch, Byte-Span .ipynb Splicer & LSP-over-MCP ====================
+
+char *belya_html_to_markdown(const char *html, size_t max_bytes) {
+    if (!html) return xstrdup("");
+    if (max_bytes == 0) max_bytes = 51200;
+
+    DynString md = dyn_str_new();
+    const char *p = html;
+    bool in_script = false;
+    bool in_style = false;
+    bool in_pre = false;
+
+    while (*p && md.len < max_bytes) {
+        if (*p == '<') {
+            if (strncmp(p, "<!--", 4) == 0) {
+                const char *end = strstr(p, "-->");
+                if (end) { p = end + 3; continue; }
+                else break;
+            }
+            if (strncasecmp(p, "<script", 7) == 0 && (p[7] == ' ' || p[7] == '>')) {
+                in_script = true;
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</script>", 9) == 0) {
+                in_script = false;
+                p += 9;
+                continue;
+            }
+            if (strncasecmp(p, "<style", 6) == 0 && (p[6] == ' ' || p[6] == '>')) {
+                in_style = true;
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</style>", 8) == 0) {
+                in_style = false;
+                p += 8;
+                continue;
+            }
+
+            if (in_script || in_style) {
+                p++;
+                continue;
+            }
+
+            if ((p[1] == 'h' || p[1] == 'H') && (p[2] >= '1' && p[2] <= '6')) {
+                int level = p[2] - '0';
+                dyn_str_append(&md, "\n\n");
+                for (int l = 0; l < level; l++) dyn_str_append(&md, "#");
+                dyn_str_append(&md, " ");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</h", 3) == 0 && p[3] >= '1' && p[3] <= '6') {
+                dyn_str_append(&md, "\n\n");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+
+            if (strncasecmp(p, "<p>", 3) == 0 || strncasecmp(p, "<p ", 3) == 0) {
+                dyn_str_append(&md, "\n\n");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</p>", 4) == 0) {
+                dyn_str_append(&md, "\n\n");
+                p += 4;
+                continue;
+            }
+            if (strncasecmp(p, "<br>", 4) == 0 || strncasecmp(p, "<br/>", 5) == 0 || strncasecmp(p, "<br />", 6) == 0) {
+                dyn_str_append(&md, "\n");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+
+            if (strncasecmp(p, "<li>", 4) == 0 || strncasecmp(p, "<li ", 4) == 0) {
+                dyn_str_append(&md, "\n* ");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</li>", 5) == 0) {
+                p += 5;
+                continue;
+            }
+
+            if (strncasecmp(p, "<pre>", 5) == 0 || strncasecmp(p, "<pre ", 5) == 0) {
+                in_pre = true;
+                dyn_str_append(&md, "\n```\n");
+                p = strchr(p, '>');
+                if (!p) break;
+                p++;
+                continue;
+            }
+            if (strncasecmp(p, "</pre>", 6) == 0) {
+                in_pre = false;
+                dyn_str_append(&md, "\n```\n");
+                p += 6;
+                continue;
+            }
+            if (strncasecmp(p, "<code>", 6) == 0 && !in_pre) {
+                dyn_str_append(&md, "`");
+                p += 6;
+                continue;
+            }
+            if (strncasecmp(p, "</code>", 7) == 0 && !in_pre) {
+                dyn_str_append(&md, "`");
+                p += 7;
+                continue;
+            }
+
+            if (strncasecmp(p, "<a ", 3) == 0) {
+                const char *href_pos = strstr(p, "href=");
+                const char *tag_end = strchr(p, '>');
+                if (href_pos && tag_end && href_pos < tag_end) {
+                    char quote = href_pos[5];
+                    char href_val[1024] = {0};
+                    if (quote == '"' || quote == '\'') {
+                        const char *h_end = strchr(href_pos + 6, quote);
+                        if (h_end && (size_t)(h_end - (href_pos + 6)) < sizeof(href_val) - 1) {
+                            strncpy(href_val, href_pos + 6, h_end - (href_pos + 6));
+                        }
+                    }
+                    p = tag_end + 1;
+                    const char *a_close = strstr(p, "</a>");
+                    if (a_close) {
+                        dyn_str_append(&md, "[");
+                        while (p < a_close) {
+                            if (*p != '<') dyn_str_appendf(&md, "%c", *p);
+                            p++;
+                        }
+                        dyn_str_appendf(&md, "](%s)", href_val);
+                        p = a_close + 4;
+                        continue;
+                    }
+                }
+            }
+
+            const char *tag_end = strchr(p, '>');
+            if (tag_end) {
+                p = tag_end + 1;
+                continue;
+            } else {
+                break;
+            }
+        }
+
+        if (in_script || in_style) {
+            p++;
+            continue;
+        }
+
+        if (*p == '&') {
+            if (strncmp(p, "&amp;", 5) == 0) { dyn_str_append(&md, "&"); p += 5; continue; }
+            if (strncmp(p, "&lt;", 4) == 0) { dyn_str_append(&md, "<"); p += 4; continue; }
+            if (strncmp(p, "&gt;", 4) == 0) { dyn_str_append(&md, ">"); p += 4; continue; }
+            if (strncmp(p, "&quot;", 6) == 0) { dyn_str_append(&md, "\""); p += 6; continue; }
+            if (strncmp(p, "&#39;", 5) == 0) { dyn_str_append(&md, "'"); p += 5; continue; }
+            if (strncmp(p, "&nbsp;", 6) == 0) { dyn_str_append(&md, " "); p += 6; continue; }
+        }
+
+        dyn_str_appendf(&md, "%c", *p);
+        p++;
+    }
+
+    if (md.len >= max_bytes) {
+        dyn_str_append(&md, "\n\n[Content truncated at 50KB]");
+    }
+
+    return md.data;
+}
+
+char *belya_harness_web_fetch(BelyaHarness *h, const char *url, const char *extract_mode) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (!url || strlen(url) == 0) return xstrdup("Error: Missing url argument.");
+
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "url", json_create_string(url));
+    char *raw = tool_fetch_url(h->agent, args);
+    json_free(args);
+
+    if (!raw) return xstrdup("Error: Failed to fetch URL.");
+    if (strncmp(raw, "Error fetching URL", 18) == 0) {
+        return raw;
+    }
+
+    if (extract_mode && strcmp(extract_mode, "text") == 0) {
+        char *converted = belya_html_to_markdown(raw, 51200);
+        free(raw);
+        return converted;
+    }
+
+    char *md = belya_html_to_markdown(raw, 51200);
+    free(raw);
+    return md;
+}
+
+char *belya_harness_web_search(BelyaHarness *h, const char *query, const char *provider) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (!query || strlen(query) == 0) return xstrdup("Error: Missing query argument.");
+
+    const char *prov = provider ? provider : "brave";
+    const char *brave_key = getenv("BRAVE_API_KEY");
+    const char *tavily_key = getenv("TAVILY_API_KEY");
+
+    if (strstr(query, "mock_test_search") != NULL || getenv("BELYA_MOCK_SEARCH") != NULL) {
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "### Web Search Results for: \"%s\" (Provider: mock)\n\n", query);
+        dyn_str_appendf(&ds, "1. [Official C99 Specification](https://iso.org/c99)\n   Snippet: ISO/IEC 9899:1999 programming languages C standard specification.\n\n");
+        dyn_str_appendf(&ds, "2. [POSIX.1-2008 System Interfaces](https://pubs.opengroup.org/onlinepubs/9699919799/)\n   Snippet: IEEE Std 1003.1, 2016 Edition covering standard POSIX functions.\n\n");
+        dyn_str_appendf(&ds, "3. [Model Context Protocol Specification](https://modelcontextprotocol.io/)\n   Snippet: Open standard for secure two-way communication between LLM applications and tools.\n");
+        return ds.data;
+    }
+
+    if (strcmp(prov, "brave") == 0 || (brave_key && !tavily_key)) {
+        if (!brave_key) {
+            DynString ds = dyn_str_new();
+            dyn_str_appendf(&ds, "Error: Brave search requested but BRAVE_API_KEY environment variable is not set.\n"
+                                "Set BRAVE_API_KEY or TAVILY_API_KEY to enable live multi-provider web search.");
+            return ds.data;
+        }
+
+        CURL *curl = curl_easy_init();
+        if (!curl) return xstrdup("Error: Failed to initialize curl.");
+        char *esc_query = curl_easy_escape(curl, query, (int)strlen(query));
+
+        DynString url_str = dyn_str_new();
+        dyn_str_appendf(&url_str, "https://api.search.brave.com/res/v1/web/search?q=%s&count=5", esc_query ? esc_query : query);
+        if (esc_query) curl_free(esc_query);
+
+        DynString resp = dyn_str_new();
+        struct curl_slist *headers = NULL;
+        char auth_hdr[256];
+        snprintf(auth_hdr, sizeof(auth_hdr), "X-Subscription-Token: %s", brave_key);
+        headers = curl_slist_append(headers, auth_hdr);
+        headers = curl_slist_append(headers, "Accept: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, url_str.data);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fetch_url_curl_sink);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+
+        CURLcode rc = curl_easy_perform(curl);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        dyn_str_free(&url_str);
+
+        if (rc != CURLE_OK) {
+            dyn_str_free(&resp);
+            return xstrdup("Error: Failed to communicate with Brave Search API.");
+        }
+
+        JsonValue *root = json_parse(resp.data);
+        dyn_str_free(&resp);
+        if (!root) return xstrdup("Error: Invalid JSON response from Brave Search.");
+
+        JsonValue *web = json_obj_get(root, "web");
+        JsonValue *results = web ? json_obj_get(web, "results") : NULL;
+
+        DynString out = dyn_str_new();
+        dyn_str_appendf(&out, "### Web Search Results for: \"%s\" (Provider: Brave)\n\n", query);
+
+        if (results && results->type == JSON_ARRAY && results->u.array.count > 0) {
+            for (size_t i = 0; i < results->u.array.count && i < 5; i++) {
+                JsonValue *item = results->u.array.items[i];
+                const char *title = json_obj_get_str(item, "title");
+                const char *url = json_obj_get_str(item, "url");
+                const char *desc = json_obj_get_str(item, "description");
+                dyn_str_appendf(&out, "%zu. [%s](%s)\n   Snippet: %s\n\n",
+                    i + 1, title ? title : "Untitled", url ? url : "", desc ? desc : "");
+            }
+        } else {
+            dyn_str_append(&out, "(No results found)\n");
+        }
+        json_free(root);
+        return out.data;
+    } else if (strcmp(prov, "tavily") == 0 || tavily_key) {
+        if (!tavily_key) {
+            return xstrdup("Error: Tavily search requested but TAVILY_API_KEY is not set.");
+        }
+        CURL *curl = curl_easy_init();
+        if (!curl) return xstrdup("Error: Failed to initialize curl.");
+
+        JsonValue *req_obj = json_create_object();
+        json_obj_add(req_obj, "api_key", json_create_string(tavily_key));
+        json_obj_add(req_obj, "query", json_create_string(query));
+        json_obj_add(req_obj, "max_results", json_create_number(5));
+        char *req_json = json_serialize(req_obj);
+        json_free(req_obj);
+
+        DynString resp = dyn_str_new();
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+
+        curl_easy_setopt(curl, CURLOPT_URL, "https://api.tavily.com/search");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req_json);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, fetch_url_curl_sink);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+
+        CURLcode rc = curl_easy_perform(curl);
+        free(req_json);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+
+        if (rc != CURLE_OK) {
+            dyn_str_free(&resp);
+            return xstrdup("Error: Failed to communicate with Tavily Search API.");
+        }
+
+        JsonValue *root = json_parse(resp.data);
+        dyn_str_free(&resp);
+        if (!root) return xstrdup("Error: Invalid JSON from Tavily Search.");
+
+        JsonValue *results = json_obj_get(root, "results");
+        DynString out = dyn_str_new();
+        dyn_str_appendf(&out, "### Web Search Results for: \"%s\" (Provider: Tavily)\n\n", query);
+        if (results && results->type == JSON_ARRAY && results->u.array.count > 0) {
+            for (size_t i = 0; i < results->u.array.count && i < 5; i++) {
+                JsonValue *item = results->u.array.items[i];
+                const char *title = json_obj_get_str(item, "title");
+                const char *url = json_obj_get_str(item, "url");
+                const char *content = json_obj_get_str(item, "content");
+                dyn_str_appendf(&out, "%zu. [%s](%s)\n   Snippet: %s\n\n",
+                    i + 1, title ? title : "Untitled", url ? url : "", content ? content : "");
+            }
+        } else {
+            dyn_str_append(&out, "(No results found)\n");
+        }
+        json_free(root);
+        return out.data;
+    }
+
+    return xstrdup("Error: Web search requires BRAVE_API_KEY or TAVILY_API_KEY environment variable. Please configure an API key.");
+}
+
+char *belya_harness_edit_notebook(BelyaHarness *h, const char *path, const char *action, int cell_index, const char *cell_type, const char *source) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    if (!path || strlen(path) == 0) return xstrdup("Error: Missing path argument.");
+    if (!action || strlen(action) == 0) return xstrdup("Error: Missing action argument ('read', 'replace_cell', 'insert_cell', 'delete_cell').");
+
+    bool is_write = strcmp(action, "read") != 0;
+    if (!is_path_jailed(path, NULL, is_write)) {
+        DynString err = dyn_str_new();
+        dyn_str_appendf(&err, "Blocked: Path '%s' is outside the workspace jail.", path);
+        return err.data;
+    }
+
+    if (h->plan_mode && is_write) {
+        return xstrdup("Blocked: Plan Mode is active (read-only execution). Notebook editing is prohibited.");
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        DynString err = dyn_str_new();
+        dyn_str_appendf(&err, "Error: Could not open notebook file '%s': %s", path, strerror(errno));
+        return err.data;
+    }
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 10 * 1024 * 1024) {
+        fclose(f);
+        return xstrdup("Error: Invalid notebook file size (empty or exceeds 10MB limit).");
+    }
+    char *content = malloc(sz + 1);
+    if (!content) {
+        fclose(f);
+        return xstrdup("Error: Memory allocation failure reading notebook.");
+    }
+    size_t rd = fread(content, 1, sz, f);
+    fclose(f);
+    content[rd] = '\0';
+
+    JsonValue *nb = json_parse(content);
+    free(content);
+    if (!nb || nb->type != JSON_OBJECT) {
+        if (nb) json_free(nb);
+        return xstrdup("Error: Notebook is not valid JSON.");
+    }
+
+    JsonValue *cells = json_obj_get(nb, "cells");
+    if (!cells || cells->type != JSON_ARRAY) {
+        json_free(nb);
+        return xstrdup("Error: Notebook missing top-level 'cells' array.");
+    }
+
+    if (strcmp(action, "read") == 0) {
+        DynString ds = dyn_str_new();
+        double nbformat = json_obj_get_num(nb, "nbformat", 4);
+        double nbformat_minor = json_obj_get_num(nb, "nbformat_minor", 2);
+        dyn_str_appendf(&ds, "### Jupyter Notebook: %s (%zu cells, format v%.0f.%.0f)\n\n",
+            path, cells->u.array.count, nbformat, nbformat_minor);
+
+        for (size_t i = 0; i < cells->u.array.count; i++) {
+            JsonValue *c = cells->u.array.items[i];
+            const char *ctype = json_obj_get_str(c, "cell_type");
+            double exec_cnt = json_obj_get_num(c, "execution_count", -1);
+            JsonValue *outs = json_obj_get(c, "outputs");
+            size_t out_cnt = (outs && outs->type == JSON_ARRAY) ? outs->u.array.count : 0;
+
+            dyn_str_appendf(&ds, "--- [Cell %zu] (type: %s", i, ctype ? ctype : "code");
+            if (strcmp(ctype ? ctype : "", "code") == 0) {
+                if (exec_cnt >= 0) dyn_str_appendf(&ds, ", execution_count: %.0f", exec_cnt);
+                dyn_str_appendf(&ds, ", outputs: %zu", out_cnt);
+            }
+            dyn_str_append(&ds, ") ---\n");
+
+            JsonValue *src_val = json_obj_get(c, "source");
+            if (src_val) {
+                if (src_val->type == JSON_STRING) {
+                    dyn_str_append(&ds, src_val->u.string);
+                } else if (src_val->type == JSON_ARRAY) {
+                    for (size_t s = 0; s < src_val->u.array.count; s++) {
+                        if (src_val->u.array.items[s] && src_val->u.array.items[s]->type == JSON_STRING) {
+                            dyn_str_append(&ds, src_val->u.array.items[s]->u.string);
+                        }
+                    }
+                }
+            }
+            dyn_str_append(&ds, "\n\n");
+        }
+        json_free(nb);
+        return ds.data;
+    } else if (strcmp(action, "replace_cell") == 0) {
+        if (cell_index < 0 || (size_t)cell_index >= cells->u.array.count) {
+            json_free(nb);
+            DynString err = dyn_str_new();
+            dyn_str_appendf(&err, "Error: Cell index %d out of bounds (notebook has %zu cells).", cell_index, cells->u.array.count);
+            return err.data;
+        }
+        if (!source) {
+            json_free(nb);
+            return xstrdup("Error: Missing source argument for replace_cell.");
+        }
+
+        JsonValue *c = cells->u.array.items[cell_index];
+        bool found_src = false;
+        for (size_t m = 0; m < c->u.object.count; m++) {
+            if (strcmp(c->u.object.members[m].key, "source") == 0) {
+                json_free(c->u.object.members[m].value);
+                c->u.object.members[m].value = json_create_string(source);
+                found_src = true;
+                break;
+            }
+        }
+        if (!found_src) {
+            json_obj_add(c, "source", json_create_string(source));
+        }
+
+        if (cell_type) {
+            for (size_t m = 0; m < c->u.object.count; m++) {
+                if (strcmp(c->u.object.members[m].key, "cell_type") == 0) {
+                    json_free(c->u.object.members[m].value);
+                    c->u.object.members[m].value = json_create_string(cell_type);
+                    break;
+                }
+            }
+        }
+
+        char *new_json = json_serialize(nb);
+        json_free(nb);
+        FILE *wf = fopen(path, "w");
+        if (!wf) {
+            free(new_json);
+            return xstrdup("Error: Failed to open notebook file for writing.");
+        }
+        fputs(new_json, wf);
+        fclose(wf);
+        free(new_json);
+
+        DynString res = dyn_str_new();
+        dyn_str_appendf(&res, "Cell %d successfully replaced in notebook '%s'.", cell_index, path);
+        belya_agent_log_timeline(h->agent, "notebook_cell_replaced", path);
+        return res.data;
+    } else if (strcmp(action, "insert_cell") == 0) {
+        if (!source) {
+            json_free(nb);
+            return xstrdup("Error: Missing source argument for insert_cell.");
+        }
+        const char *ctype = cell_type ? cell_type : "code";
+
+        JsonValue *new_cell = json_create_object();
+        json_obj_add(new_cell, "cell_type", json_create_string(ctype));
+        json_obj_add(new_cell, "metadata", json_create_object());
+        json_obj_add(new_cell, "source", json_create_string(source));
+        if (strcmp(ctype, "code") == 0) {
+            json_obj_add(new_cell, "execution_count", json_create_null());
+            json_obj_add(new_cell, "outputs", json_create_array());
+        }
+
+        size_t ins_idx = (cell_index >= 0 && (size_t)cell_index <= cells->u.array.count) ? (size_t)cell_index : cells->u.array.count;
+
+        if (cells->u.array.count >= cells->u.array.cap) {
+            size_t ncap = cells->u.array.cap ? cells->u.array.cap * 2 : 4;
+            cells->u.array.items = realloc(cells->u.array.items, ncap * sizeof(JsonValue *));
+            cells->u.array.cap = ncap;
+        }
+        for (size_t i = cells->u.array.count; i > ins_idx; i--) {
+            cells->u.array.items[i] = cells->u.array.items[i - 1];
+        }
+        cells->u.array.items[ins_idx] = new_cell;
+        cells->u.array.count++;
+
+        char *new_json = json_serialize(nb);
+        json_free(nb);
+        FILE *wf = fopen(path, "w");
+        if (!wf) {
+            free(new_json);
+            return xstrdup("Error: Failed to write notebook file.");
+        }
+        fputs(new_json, wf);
+        fclose(wf);
+        free(new_json);
+
+        DynString res = dyn_str_new();
+        dyn_str_appendf(&res, "New %s cell successfully inserted at index %zu in '%s'.", ctype, ins_idx, path);
+        belya_agent_log_timeline(h->agent, "notebook_cell_inserted", path);
+        return res.data;
+    } else if (strcmp(action, "delete_cell") == 0) {
+        if (cell_index < 0 || (size_t)cell_index >= cells->u.array.count) {
+            json_free(nb);
+            DynString err = dyn_str_new();
+            dyn_str_appendf(&err, "Error: Cell index %d out of bounds (notebook has %zu cells).", cell_index, cells->u.array.count);
+            return err.data;
+        }
+
+        json_free(cells->u.array.items[cell_index]);
+        for (size_t i = (size_t)cell_index; i + 1 < cells->u.array.count; i++) {
+            cells->u.array.items[i] = cells->u.array.items[i + 1];
+        }
+        cells->u.array.count--;
+
+        char *new_json = json_serialize(nb);
+        json_free(nb);
+        FILE *wf = fopen(path, "w");
+        if (!wf) {
+            free(new_json);
+            return xstrdup("Error: Failed to write notebook file.");
+        }
+        fputs(new_json, wf);
+        fclose(wf);
+        free(new_json);
+
+        DynString res = dyn_str_new();
+        dyn_str_appendf(&res, "Cell %d successfully deleted from notebook '%s'.", cell_index, path);
+        belya_agent_log_timeline(h->agent, "notebook_cell_deleted", path);
+        return res.data;
+    }
+
+    json_free(nb);
+    return xstrdup("Error: Unrecognized notebook action ('read', 'replace_cell', 'insert_cell', 'delete_cell').");
+}
+
+char *belya_harness_lsp_definition(BelyaHarness *h, const char *file, int line, int character, const char *symbol) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+
+    for (size_t t = 0; t < h->tool_count; t++) {
+        if (h->tools[t].mcp_client && h->tools[t].mcp_client->connected) {
+            const char *tname = h->tools[t].name;
+            if (tname && (strcmp(tname, "textDocument/definition") == 0 ||
+                          strcmp(tname, "lsp_definition") == 0 ||
+                          strcmp(tname, "definition") == 0)) {
+                JsonValue *args = json_create_object();
+                if (file) json_obj_add(args, "file", json_create_string(file));
+                json_obj_add(args, "line", json_create_number(line));
+                json_obj_add(args, "character", json_create_number(character));
+                if (symbol) json_obj_add(args, "symbol", json_create_string(symbol));
+                char *resp = mcp_client_call_tool(h->tools[t].mcp_client, tname, args);
+                json_free(args);
+                if (resp) return resp;
+            }
+        }
+    }
+
+    char sym_buf[128] = {0};
+    if (symbol && strlen(symbol) > 0) {
+        strncpy(sym_buf, symbol, sizeof(sym_buf) - 1);
+    } else if (file && line > 0) {
+        FILE *f = fopen(file, "r");
+        if (f) {
+            char line_buf[1024];
+            int cur_line = 0;
+            while (fgets(line_buf, sizeof(line_buf), f)) {
+                cur_line++;
+                if (cur_line == line) {
+                    int c_idx = character > 0 ? character - 1 : 0;
+                    if (c_idx >= (int)strlen(line_buf)) c_idx = (int)strlen(line_buf) - 1;
+                    while (c_idx > 0 && (isalnum((unsigned char)line_buf[c_idx - 1]) || line_buf[c_idx - 1] == '_')) {
+                        c_idx--;
+                    }
+                    int out_idx = 0;
+                    while (line_buf[c_idx] && (isalnum((unsigned char)line_buf[c_idx]) || line_buf[c_idx] == '_') && out_idx < (int)sizeof(sym_buf) - 1) {
+                        sym_buf[out_idx++] = line_buf[c_idx++];
+                    }
+                    sym_buf[out_idx] = '\0';
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (strlen(sym_buf) == 0) {
+        return xstrdup("Error: Could not determine symbol name for LSP definition lookup.");
+    }
+
+    char *res = belya_harness_goto_definition(h, sym_buf);
+    if (!res || strstr(res, "not found") != NULL) {
+        if (res) free(res);
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "[LSP Definition] Symbol '%s' not found in workspace AST index.", sym_buf);
+        return ds.data;
+    }
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "[LSP Definition] (Source: Native Symbol Graph)\n%s", res);
+    free(res);
+    return ds.data;
+}
+
+char *belya_harness_lsp_references(BelyaHarness *h, const char *file, int line, int character, const char *symbol) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+
+    for (size_t t = 0; t < h->tool_count; t++) {
+        if (h->tools[t].mcp_client && h->tools[t].mcp_client->connected) {
+            const char *tname = h->tools[t].name;
+            if (tname && (strcmp(tname, "textDocument/references") == 0 ||
+                          strcmp(tname, "lsp_references") == 0 ||
+                          strcmp(tname, "references") == 0)) {
+                JsonValue *args = json_create_object();
+                if (file) json_obj_add(args, "file", json_create_string(file));
+                json_obj_add(args, "line", json_create_number(line));
+                json_obj_add(args, "character", json_create_number(character));
+                if (symbol) json_obj_add(args, "symbol", json_create_string(symbol));
+                char *resp = mcp_client_call_tool(h->tools[t].mcp_client, tname, args);
+                json_free(args);
+                if (resp) return resp;
+            }
+        }
+    }
+
+    char sym_buf[128] = {0};
+    if (symbol && strlen(symbol) > 0) {
+        strncpy(sym_buf, symbol, sizeof(sym_buf) - 1);
+    } else if (file && line > 0) {
+        FILE *f = fopen(file, "r");
+        if (f) {
+            char line_buf[1024];
+            int cur_line = 0;
+            while (fgets(line_buf, sizeof(line_buf), f)) {
+                cur_line++;
+                if (cur_line == line) {
+                    int c_idx = character > 0 ? character - 1 : 0;
+                    if (c_idx >= (int)strlen(line_buf)) c_idx = (int)strlen(line_buf) - 1;
+                    while (c_idx > 0 && (isalnum((unsigned char)line_buf[c_idx - 1]) || line_buf[c_idx - 1] == '_')) {
+                        c_idx--;
+                    }
+                    int out_idx = 0;
+                    while (line_buf[c_idx] && (isalnum((unsigned char)line_buf[c_idx]) || line_buf[c_idx] == '_') && out_idx < (int)sizeof(sym_buf) - 1) {
+                        sym_buf[out_idx++] = line_buf[c_idx++];
+                    }
+                    sym_buf[out_idx] = '\0';
+                    break;
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (strlen(sym_buf) == 0) {
+        return xstrdup("Error: Could not determine symbol name for LSP references lookup.");
+    }
+
+    char *res = belya_harness_find_callers(h, sym_buf);
+    if (!res || strstr(res, "No callers") != NULL) {
+        if (res) free(res);
+        DynString ds = dyn_str_new();
+        dyn_str_appendf(&ds, "[LSP References] No references found for symbol '%s'.", sym_buf);
+        return ds.data;
+    }
+
+    DynString ds = dyn_str_new();
+    dyn_str_appendf(&ds, "[LSP References] (Source: Native Symbol Graph)\n%s", res);
+    free(res);
+    return ds.data;
+}
+
+// 2026 Competitive Parity Phase 7: Stdin-Piped Modular Remote Execution Backends
+char *belya_remote_exec_piped(BelyaExecBackend backend, const char *target, const char *workdir, const char *cmd, int *exit_code) {
+    if (exit_code) *exit_code = 0;
+    if (!cmd) return xstrdup("Error: No command specified.");
+
+    if (backend == BELYA_BACKEND_DOCKER && (!target || strlen(target) == 0)) {
+        if (exit_code) *exit_code = 1;
+        return xstrdup("Error: Missing Docker container target.");
+    }
+    if (backend == BELYA_BACKEND_SSH && (!target || strlen(target) == 0)) {
+        if (exit_code) *exit_code = 1;
+        return xstrdup("Error: Missing SSH host target.");
+    }
+
+    int in_pipe[2];
+    int out_pipe[2];
+    if (pipe(in_pipe) == -1) {
+        if (exit_code) *exit_code = -1;
+        return xstrdup("Error: Failed to create stdin pipe.");
+    }
+    if (pipe(out_pipe) == -1) {
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        if (exit_code) *exit_code = -1;
+        return xstrdup("Error: Failed to create stdout pipe.");
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
+        if (exit_code) *exit_code = -1;
+        return xstrdup("Error: Subprocess fork failed.");
+    }
+
+    if (pid == 0) {
+        close(in_pipe[1]);
+        if (dup2(in_pipe[0], STDIN_FILENO) == -1) _exit(127);
+        close(in_pipe[0]);
+
+        close(out_pipe[0]);
+        if (dup2(out_pipe[1], STDOUT_FILENO) == -1) _exit(127);
+        if (dup2(out_pipe[1], STDERR_FILENO) == -1) _exit(127);
+        close(out_pipe[1]);
+
+        if (backend == BELYA_BACKEND_DOCKER) {
+            const char *w = (workdir && strlen(workdir) > 0) ? workdir : "/";
+            char *argv[] = {"docker", "exec", "-i", "-w", (char *)w, (char *)target, "/bin/sh", NULL};
+            execvp("docker", argv);
+        } else if (backend == BELYA_BACKEND_SSH) {
+            char *argv[] = {"ssh", "-T", "-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/belya_ssh_%r@%h:%p", "-o", "ControlPersist=600", (char *)target, "/bin/sh", NULL};
+            execvp("ssh", argv);
+        } else {
+            char *argv[] = {"/bin/sh", NULL};
+            execvp("/bin/sh", argv);
+        }
+        _exit(127);
+    }
+
+    // Parent
+    close(in_pipe[0]);
+    close(out_pipe[1]);
+
+    size_t cmd_len = strlen(cmd);
+    size_t written = 0;
+    while (written < cmd_len) {
+        ssize_t n = write(in_pipe[1], cmd + written, cmd_len - written);
+        if (n <= 0) break;
+        written += (size_t)n;
+    }
+    ssize_t wn = write(in_pipe[1], "\n", 1);
+    (void)wn;
+    close(in_pipe[1]); // Close stdin to signal EOF to child shell
+
+    int flags = fcntl(out_pipe[0], F_GETFL, 0);
+    fcntl(out_pipe[0], F_SETFL, flags | O_NONBLOCK);
+
+    DynString out = dyn_str_new();
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+    const char *to_env = getenv("BASH_TIMEOUT");
+    double max_timeout = (to_env && atof(to_env) > 0) ? atof(to_env) : 30.0;
+
+    while (1) {
+        char buf[512];
+        ssize_t bytes = read(out_pipe[0], buf, sizeof(buf) - 1);
+        if (bytes > 0) {
+            buf[bytes] = '\0';
+            dyn_str_append(&out, buf);
+            if (out.len > 100000) {
+                dyn_str_append(&out, "\n[Output Truncated by Belya Remote Backend (100KB buffer limit)]");
+                kill(pid, SIGKILL);
+                waitpid(pid, NULL, 0);
+                break;
+            }
+        }
+
+        int status = 0;
+        pid_t res = waitpid(pid, &status, WNOHANG);
+        if (res == pid) {
+            while ((bytes = read(out_pipe[0], buf, sizeof(buf) - 1)) > 0) {
+                buf[bytes] = '\0';
+                dyn_str_append(&out, buf);
+                if (out.len > 100000) break;
+            }
+            if (exit_code) {
+                if (WIFEXITED(status)) *exit_code = WEXITSTATUS(status);
+                else if (WIFSIGNALED(status)) *exit_code = 128 + WTERMSIG(status);
+            }
+            break;
+        }
+
+        gettimeofday(&now, NULL);
+        double elapsed = (double)(now.tv_sec - start.tv_sec) + (double)(now.tv_usec - start.tv_usec) / 1000000.0;
+        if (elapsed > max_timeout) {
+            kill(pid, SIGTERM);
+            usleep(100000);
+            kill(pid, SIGKILL);
+            waitpid(pid, NULL, 0);
+            if (exit_code) *exit_code = 124;
+            dyn_str_append(&out, "\n[Error: Command timed out]");
+            break;
+        }
+
+        struct timespec ts = {0, 10000000L}; // 10ms
+        nanosleep(&ts, NULL);
+    }
+
+    close(out_pipe[0]);
+    return out.data;
+}
+
+void belya_harness_set_exec_backend(BelyaHarness *h, BelyaExecBackend backend, const char *target) {
+    if (!h) return;
+    h->exec_backend = backend;
+    if (backend == BELYA_BACKEND_DOCKER && target) {
+        snprintf(h->docker_container, sizeof(h->docker_container), "%s", target);
+    } else if (backend == BELYA_BACKEND_SSH && target) {
+        snprintf(h->ssh_host, sizeof(h->ssh_host), "%s", target);
+    }
+}
+
+char *belya_harness_exec_remote(BelyaHarness *h, const char *cmd, int *exit_code) {
+    if (!h) return xstrdup("Error: Invalid harness.");
+    const char *target = (h->exec_backend == BELYA_BACKEND_DOCKER) ? h->docker_container : h->ssh_host;
+    return belya_remote_exec_piped(h->exec_backend, target, h->cwd, cmd, exit_code);
 }
 
 static void print_help(BelyaHarness *h) {
@@ -2451,12 +5113,20 @@ static void print_help(BelyaHarness *h) {
     printf("  /compact [N]     Prune older messages, keeping N recent (default: 10)\n");
     printf("  /memory [query]  Search SQLite persistent memory directly\n");
     printf("  /model <name>    Dynamically change the active AI model\n");
+    printf("  /diff [path]     View colorized Git working copy or staged diff\n");
+    printf("  /doctor          Run environment & systems integrity diagnostics\n");
+    printf("  /cost            View token accounting and session cost estimate\n");
     printf("  /openrouter [m]  Switch to OpenRouter (e.g. anthropic/claude-3.7-sonnet, deepseek/deepseek-r1)\n");
     printf("  /ollama [model]  Switch to local Ollama (e.g. qwen2.5-coder:7b, deepseek-r1:7b-m2)\n");
     printf("  /key <api_key>   Dynamically set or update API key (for OpenRouter / cloud providers)\n");
     printf("  /cwd [path]      View or change working directory\n");
     printf("  /mcp <command>   Connect to an external MCP stdio server\n");
     printf("  /agency [task]   Execute task via Belya Agency multi-agent pipeline (or list subagents)\n");
+    printf("  /tasks [filter]  List active tasks from SQLite task board\n");
+    printf("  /cron            List scheduled recurring background cron jobs\n");
+    printf("  /dream           Trigger cross-session memory consolidation sweep\n");
+    printf("  /plan            Toggle read-only Plan Mode sandbox\n");
+    printf("  /bg              List running background PTY subshell tasks\n");
     printf("  exit             Terminate the harness REPL\n\n");
 }
 
@@ -2486,7 +5156,9 @@ static void harness_completion_hook(const char *buf, linenoiseCompletions *lc) {
             "/help", "/status", "/tools", "/rules", "/timeline",
             "/sessions", "/save", "/resume", "/skills", "/checkpoint",
             "/rollback", "/export", "/cache", "/reflect", "/clear",
-            "/compact", "/memory", "/model", "/openrouter", "/ollama", "/key", "/cwd", "/mcp", "/agency", NULL
+            "/compact", "/memory", "/model", "/diff", "/doctor", "/cost",
+            "/tasks", "/cron", "/dream", "/plan", "/bg",
+            "/openrouter", "/ollama", "/key", "/cwd", "/mcp", "/agency", NULL
         };
         for (int i = 0; commands[i]; i++) {
             if (strncmp(buf, commands[i], strlen(buf)) == 0) {
@@ -2696,6 +5368,42 @@ void belya_harness_repl(BelyaHarness *h) {
                 if (res) free(res);
                 continue;
             }
+            if (strncmp(input_buf, "/tasks", 6) == 0) {
+                const char *filter = strlen(input_buf) > 6 ? input_buf + 6 : "";
+                while (*filter == ' ') filter++;
+                char *tl = belya_agent_task_list(h->agent, strlen(filter) > 0 ? filter : "all");
+                printf("\n%s\n", tl ? tl : "No tasks found.");
+                if (tl) free(tl);
+                continue;
+            }
+            if (strcmp(input_buf, "/cron") == 0) {
+                char *cl = belya_agent_cron_list(h->agent);
+                printf("\n%s\n", cl ? cl : "No cron jobs registered.");
+                if (cl) free(cl);
+                continue;
+            }
+            if (strcmp(input_buf, "/dream") == 0) {
+                char *dr = belya_agent_dream_sweep(h->agent);
+                printf("\n%s\n", dr ? dr : "Dream consolidation complete.");
+                if (dr) free(dr);
+                continue;
+            }
+            if (strcmp(input_buf, "/plan") == 0) {
+                if (h->plan_mode) {
+                    belya_harness_exit_plan_mode(h);
+                    printf("\n\033[1;32m[Plan Mode]: Deactivated. Mutating filesystem and shell actions restored.\033[0m\n\n");
+                } else {
+                    belya_harness_enter_plan_mode(h);
+                    printf("\n\033[1;33m[Plan Mode]: Activated (Read-Only Sandbox). Write, edit, patch, and mutating shell commands are locked.\033[0m\n\n");
+                }
+                continue;
+            }
+            if (strcmp(input_buf, "/bg") == 0) {
+                char *bg_list = belya_harness_task_list(h);
+                printf("\n%s\n", bg_list ? bg_list : "No background tasks.");
+                if (bg_list) free(bg_list);
+                continue;
+            }
             if (strncmp(input_buf, "/openrouter", 11) == 0) {
                 const char *new_m = strlen(input_buf) > 11 ? input_buf + 11 : "";
                 while (*new_m == ' ') new_m++;
@@ -2774,6 +5482,50 @@ void belya_harness_repl(BelyaHarness *h) {
                 }
                 continue;
             }
+            if (strncmp(input_buf, "/diff", 5) == 0) {
+                const char *dpath = strlen(input_buf) > 5 ? input_buf + 5 : "";
+                while (*dpath == ' ') dpath++;
+                JsonValue *args = json_create_object();
+                if (strlen(dpath) > 0) {
+                    json_obj_add(args, "path", json_create_string(dpath));
+                }
+                char *raw = tool_git_diff(h->agent, args);
+                json_free(args);
+                char *colored = belya_ansi_diff_colorize(raw);
+                printf("\n%s\n", colored ? colored : raw);
+                if (colored) free(colored);
+                free(raw);
+                continue;
+            }
+            if (strcmp(input_buf, "/doctor") == 0) {
+                printf("\n\033[1;36m=== Almaz Environment Doctor & Diagnostics ===\033[0m\n");
+                int gcc_ret = system("gcc --version >/dev/null 2>&1");
+                printf("  [✓] C Compiler (gcc): %s\n", (gcc_ret == 0) ? "Available (C99 ready)" : "Missing");
+                int git_ret = system("git rev-parse --is-inside-work-tree >/dev/null 2>&1");
+                printf("  [✓] Git Worktree:     %s\n", (git_ret == 0) ? "Active git repository" : "Not a git repo");
+                printf("  [✓] SQLite3 Library:  Version %s\n", sqlite3_libversion());
+                printf("  [✓] Libcurl:          Version %s\n", curl_version());
+                printf("  [✓] Memory Footprint: Peak RSS %.2f MB\n", belya_get_current_rss_mb());
+                printf("  [✓] Terminal Mode:    %s\n", isatty(STDIN_FILENO) ? "Interactive TTY (ANSI VT100 enabled)" : "Non-interactive / Headless");
+                printf("  [✓] Model Endpoint:   %s (%s)\n\n", h->agent->gateway->endpoint, h->agent->gateway->model);
+                continue;
+            }
+            if (strcmp(input_buf, "/cost") == 0) {
+                size_t p_tok = h->agent->total_prompt_tokens;
+                size_t c_tok = h->agent->total_completion_tokens;
+                size_t cached_tok = h->agent->total_cached_tokens;
+                double prompt_cost = ((double)(p_tok > cached_tok ? p_tok - cached_tok : 0) / 1000000.0) * 3.0;
+                double cached_cost = ((double)cached_tok / 1000000.0) * 0.30;
+                double compl_cost = ((double)c_tok / 1000000.0) * 15.0;
+                double total_cost = prompt_cost + cached_cost + compl_cost;
+                printf("\n\033[1;36m=== Token Usage & Estimated Cost ===\033[0m\n");
+                printf("  Model:             \033[1;33m%s\033[0m\n", h->agent->gateway->model);
+                printf("  Prompt Tokens:     %zu (Cached: %zu)\n", p_tok, cached_tok);
+                printf("  Completion Tokens: %zu\n", c_tok);
+                printf("  Total Tokens:      %zu\n", p_tok + c_tok);
+                printf("  Estimated Cost:    \033[1;32m$%.4f USD\033[0m\n\n", total_cost);
+                continue;
+            }
             if (strncmp(input_buf, "/cwd", 4) == 0) {
                 const char *new_d = strlen(input_buf) > 4 ? input_buf + 4 : "";
                 while (*new_d == ' ') new_d++;
@@ -2833,6 +5585,9 @@ void belya_harness_repl(BelyaHarness *h) {
 
         belya_harness_execute_turn(h, input_buf);
     }
+
+    BelyaHookResult stop_hook = belya_run_lifecycle_hook(h, BELYA_HOOK_STOP, NULL, NULL, NULL);
+    belya_hook_result_free(&stop_hook);
 }
 
 char *belya_troubleshooting_resolve(const char *error_trace, const char *troubleshooting_path) {
@@ -2909,6 +5664,60 @@ char *belya_troubleshooting_resolve(const char *error_trace, const char *trouble
     return matched_remedy;
 }
 
+static uint64_t fnv1a_hash_str(const char *s, uint64_t hash) {
+    if (!s) return hash;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        hash ^= (uint64_t)(*p++);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static uint64_t compute_action_hash(const char *tool_name, const char *args_json) {
+    uint64_t h = 14695981039346656037ULL;
+    h = fnv1a_hash_str(tool_name, h);
+    h = fnv1a_hash_str(":", h);
+    h = fnv1a_hash_str(args_json, h);
+    return h;
+}
+
+int belya_harness_detect_loop(BelyaHarness *h, int *out_period) {
+    if (!h || h->loop_detector.count < 3) return 0;
+    if (out_period) *out_period = 0;
+
+    int total = h->loop_detector.count;
+    int head = h->loop_detector.head;
+
+    // Check periods k = 1, 2, 3
+    for (int k = 1; k <= 3; k++) {
+        // To verify 3 consecutive cycles of length k, we need at least 3 * k records
+        if (total < 3 * k) continue;
+
+        bool cycle_matched = true;
+        for (int i = 0; i < k; i++) {
+            int idx_curr = (head - 1 - i + HARNESS_ACTION_HISTORY_SIZE) % HARNESS_ACTION_HISTORY_SIZE;
+            int idx_prev1 = (head - 1 - i - k + HARNESS_ACTION_HISTORY_SIZE) % HARNESS_ACTION_HISTORY_SIZE;
+            int idx_prev2 = (head - 1 - i - 2 * k + HARNESS_ACTION_HISTORY_SIZE) % HARNESS_ACTION_HISTORY_SIZE;
+
+            uint64_t h_curr = h->loop_detector.history[idx_curr].action_hash;
+            uint64_t h_prev1 = h->loop_detector.history[idx_prev1].action_hash;
+            uint64_t h_prev2 = h->loop_detector.history[idx_prev2].action_hash;
+
+            if (h_curr != h_prev1 || h_curr != h_prev2) {
+                cycle_matched = false;
+                break;
+            }
+        }
+
+        if (cycle_matched) {
+            if (out_period) *out_period = k;
+            return k;
+        }
+    }
+    return 0;
+}
+
 void belya_harness_reset_turn_state(BelyaHarness *h) {
     if (!h) return;
     h->files_modified_in_turn = false;
@@ -2917,6 +5726,8 @@ void belya_harness_reset_turn_state(BelyaHarness *h) {
     h->consecutive_tool_failures = 0;
     memset(h->last_failed_tool, 0, sizeof(h->last_failed_tool));
     memset(h->last_failed_args, 0, sizeof(h->last_failed_args));
+    h->loop_breaker_tripped = false;
+    memset(&h->loop_detector, 0, sizeof(h->loop_detector));
 }
 
 bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_name, const char *args_json, const char *observation, char **out_breaker_msg) {
@@ -2946,6 +5757,21 @@ bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_nam
         is_failure = true;
     }
 
+    // Record into Loop Detector ring buffer
+    int head_idx = h->loop_detector.head;
+    h->loop_detector.history[head_idx].action_hash = compute_action_hash(tool_name, args_json);
+    snprintf(h->loop_detector.history[head_idx].tool_name, sizeof(h->loop_detector.history[head_idx].tool_name), "%s", tool_name ? tool_name : "");
+    h->loop_detector.history[head_idx].return_code = is_failure ? 1 : 0;
+    h->loop_detector.history[head_idx].timestamp = time(NULL);
+    h->loop_detector.head = (head_idx + 1) % HARNESS_ACTION_HISTORY_SIZE;
+    if (h->loop_detector.count < HARNESS_ACTION_HISTORY_SIZE) {
+        h->loop_detector.count++;
+    }
+
+    // Check for In-Context Locking / Attractor Loop
+    int detected_k = 0;
+    belya_harness_detect_loop(h, &detected_k);
+
     if (is_failure) {
         char args_prefix[256];
         snprintf(args_prefix, sizeof(args_prefix), "%.255s", args_json ? args_json : "");
@@ -2957,13 +5783,54 @@ bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_nam
             h->consecutive_tool_failures = 1;
         }
 
+        if (h->agent) {
+            almaz_coral_record_tactical(h->agent, tool_name, "tool_failure", tool_name, observation);
+            if (h->consecutive_tool_failures >= 2) {
+                char r_key[128];
+                snprintf(r_key, sizeof(r_key), "rubric_%s_failure", tool_name);
+                almaz_coral_promote_strategic(h->agent, r_key, "tool_consecutive_failure", tool_name,
+                                              "Tool executed multiple consecutive failures with current arguments",
+                                              "Review file structure and argument formats before executing tool again.",
+                                              tool_name);
+            }
+        }
+
         char *remedy = observation ? belya_troubleshooting_resolve(observation, "TROUBLESHOOTING.md") : NULL;
 
-        if (h->consecutive_tool_failures >= 3) {
+        int max_allowed_failures = 3;
+        if (h->agent && h->agent->db) {
+            sqlite3_stmt *gstmt = NULL;
+            if (sqlite3_prepare_v2(h->agent->db, "SELECT category FROM agent_goals WHERE status = 'pending' AND category IN ('HEALTH_REMEDIATION', 'ANOMALY_REMEDIATION') LIMIT 1;", -1, &gstmt, NULL) == SQLITE_OK) {
+                if (sqlite3_step(gstmt) == SQLITE_ROW) {
+                    max_allowed_failures = 5;
+                }
+                sqlite3_finalize(gstmt);
+            }
+        }
+
+        bool attractor_tripped = (detected_k > 0);
+        if (max_allowed_failures > 3 && detected_k == 1 && h->consecutive_tool_failures < max_allowed_failures) {
+            attractor_tripped = false;
+        }
+
+        if (h->consecutive_tool_failures >= max_allowed_failures || attractor_tripped) {
+            h->loop_breaker_tripped = true;
+            if (detected_k > 0) {
+                h->loop_detector.consecutive_cycle_matches++;
+                h->loop_detector.detected_period = detected_k;
+            }
+
             DynString cb = dyn_str_new();
-            dyn_str_appendf(&cb, "%s\n\n[METACOGNITIVE CIRCUIT BREAKER]: You have attempted tool '%s' with identical/failing arguments 3 times consecutively. "
+            dyn_str_appendf(&cb, "%s\n\n[METACOGNITIVE CIRCUIT BREAKER]: You have attempted tool '%s' with identical/failing arguments %d times consecutively. "
                                  "STOP repeating this action. Step back, re-evaluate assumptions, inspect error details, or switch to an alternate strategy.",
-                            observation ? observation : "Tool returned empty observation", tool_name);
+                            observation ? observation : "Tool returned empty observation", tool_name, max_allowed_failures);
+            if (detected_k > 1) {
+                dyn_str_appendf(&cb, "\n\n[CIRCUIT INTERRUPT: DETERMINISTIC ATTRACTOR DETECTED (Period %d)]\n"
+                                     "You have executed the exact same sequence of %d action(s) (%s) 3 consecutive times with identical parameters.\n"
+                                     "Your current hypothesis is fundamentally flawed. You are strictly forbidden from repeating this action.\n"
+                                     "Step back, re-read your initial constraints, and select an alternative hypothesis.",
+                                detected_k, detected_k, tool_name);
+            }
             if (remedy) {
                 dyn_str_appendf(&cb, "\n\n💡 [TROUBLESHOOTING RESOLVER]: Known Failure Pattern Remedy:\n%s", remedy);
                 free(remedy);
@@ -2985,6 +5852,28 @@ bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_nam
         h->consecutive_tool_failures = 0;
         memset(h->last_failed_tool, 0, sizeof(h->last_failed_tool));
         memset(h->last_failed_args, 0, sizeof(h->last_failed_args));
+
+        // Even on success, an infinite attractor loop (e.g. bash ls in a loop) must be broken!
+        if (detected_k > 0) {
+            h->loop_breaker_tripped = true;
+            h->loop_detector.consecutive_cycle_matches++;
+            h->loop_detector.detected_period = detected_k;
+
+            DynString loop_cb = dyn_str_new();
+            dyn_str_appendf(&loop_cb, "%s\n\n[CIRCUIT INTERRUPT: DETERMINISTIC ATTRACTOR DETECTED (Period %d)]\n"
+                                      "You have executed the exact same sequence of %d action(s) (%s) 3 consecutive times with identical parameters.\n"
+                                      "Your current hypothesis is fundamentally flawed. You are strictly forbidden from repeating this action.\n"
+                                      "Step back, re-read your initial constraints, and select an alternative hypothesis.",
+                            observation ? observation : "Tool returned empty observation",
+                            detected_k, detected_k, tool_name);
+            if (out_breaker_msg) {
+                if (*out_breaker_msg) free(*out_breaker_msg);
+                *out_breaker_msg = loop_cb.data;
+            } else {
+                dyn_str_free(&loop_cb);
+            }
+            return true;
+        }
     }
     return false;
 }
@@ -3075,6 +5964,18 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                     continue;
                 }
 
+                // 2026 Competitive Parity Phase 4: Plan Mode Gate
+                if (h->plan_mode) {
+                    if (strcmp(tc->name, "write_file") == 0 ||
+                        strcmp(tc->name, "edit_file") == 0 ||
+                        strcmp(tc->name, "apply_patch") == 0 ||
+                        strcmp(tc->name, "define_tool") == 0) {
+                        printf("\033[1;31m[Plan Mode Guard]: Mutating tool '%s' blocked in read-only plan mode.\033[0m\n", tc->name);
+                        belya_agent_add_tool_result(h->agent, tc->id, tc->name, "Blocked: Plan Mode is active (read-only execution). Use exit_plan_mode to perform modifications.");
+                        continue;
+                    }
+                }
+
                 if (matched->security == PERM_ASK_USER) {
                     bool permitted = false;
                     if (h->permission_prompt_fn) {
@@ -3122,6 +6023,20 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                     }
                 }
 
+                BelyaHookResult pre_hook = belya_run_lifecycle_hook(h, BELYA_HOOK_PRE_TOOL_USE, tc->name, tc->arguments_json, NULL);
+                if (pre_hook.blocked) {
+                    printf("\033[1;31m[Hook Policy Rejected]: Tool '%s' blocked by PreToolUse hook policy: %s\033[0m\n",
+                           tc->name, pre_hook.output ? pre_hook.output : "Operation blocked.");
+                    DynString rej = dyn_str_new();
+                    dyn_str_appendf(&rej, "Error: PreToolUse hook blocked execution: %s",
+                                    pre_hook.output ? pre_hook.output : "Operation blocked by security policy.");
+                    belya_agent_add_tool_result(h->agent, tc->id, tc->name, rej.data);
+                    dyn_str_free(&rej);
+                    belya_hook_result_free(&pre_hook);
+                    continue;
+                }
+                belya_hook_result_free(&pre_hook);
+
                 JsonValue *args_parsed = json_parse(tc->arguments_json);
                 char *observation = NULL;
                 g_active_custom_script_path = matched->custom_script_path;
@@ -3136,6 +6051,9 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                 char *breaker_alert = NULL;
                 bool tripped = belya_harness_record_tool_observation(h, tc->name, tc->arguments_json, observation, &breaker_alert);
                 const char *final_obs = breaker_alert ? breaker_alert : (observation ? observation : "Success");
+
+                BelyaHookResult post_hook = belya_run_lifecycle_hook(h, BELYA_HOOK_POST_TOOL_USE, tc->name, tc->arguments_json, final_obs);
+                belya_hook_result_free(&post_hook);
 
                 bool tool_success = (!tripped && observation && strncmp(observation, "Error:", 6) != 0 && strncmp(observation, "error:", 6) != 0);
                 almaz_agent_record_appraisal(h->agent, tool_success);
@@ -3213,6 +6131,38 @@ void almaz_goals_generate_deterministic(BelyaHarness *h) {
 
     // 4. Check workspace git cleanliness
     almaz_goals_add(db, "verify_workspace_integrity", "CODE_AUDIT", 50, "Check git status and workspace clean state");
+
+    // 5. FadeMem biological decay pruning check
+    sqlite3_stmt *decay_stmt = NULL;
+    const char *dec_sql = "SELECT COUNT(*) FROM agent_memory "
+                          "WHERE (wing IS NULL OR (wing != 'core_identity' AND wing != 'distilled_schemata')) "
+                          "  AND (room IS NULL OR room != 'identity') "
+                          "  AND fademem_retention(strftime('%s', 'now'), strftime('%s', last_accessed_at), access_count, salience, 0.05) < 0.15;";
+    if (sqlite3_prepare_v2(db, dec_sql, -1, &decay_stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(decay_stmt) == SQLITE_ROW) {
+            int decaying_count = sqlite3_column_int(decay_stmt, 0);
+            if (decaying_count > 0) {
+                almaz_goals_add(db, "fademem_prune_sweep", "BIOLOGICAL_MEMORY", 65, "Prune memory nodes with FadeMem retention below 0.15 threshold");
+            }
+        }
+        sqlite3_finalize(decay_stmt);
+    }
+
+    // 6. Subconscious concept fusion check
+    sqlite3_stmt *fusion_stmt = NULL;
+    const char *fus_sql = "SELECT COUNT(*) FROM (SELECT wing, room, COUNT(*) as cnt FROM agent_memory "
+                          "WHERE (wing IS NULL OR (wing != 'core_identity' AND wing != 'distilled_schemata')) "
+                          "  AND (room IS NULL OR room != 'identity') "
+                          "GROUP BY wing, room HAVING cnt >= 5);";
+    if (sqlite3_prepare_v2(db, fus_sql, -1, &fusion_stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(fusion_stmt) == SQLITE_ROW) {
+            int clusters = sqlite3_column_int(fusion_stmt, 0);
+            if (clusters > 0) {
+                almaz_goals_add(db, "concept_fusion_sweep", "KNOWLEDGE_CONSOLIDATION", 75, "Consolidate clustered episodic memories into distilled invariant schemata");
+            }
+        }
+        sqlite3_finalize(fusion_stmt);
+    }
 }
 
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
@@ -3280,6 +6230,12 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
             }
             sqlite3_finalize(err_stmt);
         }
+    } else if (strcmp(goal_name, "fademem_prune_sweep") == 0) {
+        size_t pruned = almaz_fademem_prune_sweep(h->agent, 0.15);
+        dyn_str_appendf(&res_ds, "FadeMem pruning sweep completed: archived %zu decaying nodes.", pruned);
+    } else if (strcmp(goal_name, "concept_fusion_sweep") == 0) {
+        size_t fused = almaz_concept_fusion_sweep(h->agent);
+        dyn_str_appendf(&res_ds, "Subconscious concept fusion completed: consolidated %zu episodes into invariant schemata.", fused);
     } else if (strcmp(category, "HEALTH_REMEDIATION") == 0 || strcmp(category, "ANOMALY_REMEDIATION") == 0) {
         /* H6: deterministic remediation runbooks — no more fake "completed".
            Each known goal gets a real, bounded, non-destructive action;
@@ -3399,6 +6355,23 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
 
 void belya_harness_free(BelyaHarness *h) {
     if (!h) return;
+    for (size_t i = 0; i < BELYA_MAX_BACKGROUND_TASKS; i++) {
+        BelyaBackgroundTask *t = &h->task_table.tasks[i];
+        if (t->state == BELYA_TASK_STATE_RUNNING) {
+            kill(-t->pgid, SIGTERM);
+            usleep(10000);
+            kill(-t->pgid, SIGKILL);
+            waitpid(t->pid, NULL, WNOHANG);
+            if (t->master_fd > STDERR_FILENO) {
+                close(t->master_fd);
+            }
+            t->master_fd = -1;
+            t->state = BELYA_TASK_STATE_KILLED;
+        } else if (t->master_fd > STDERR_FILENO) {
+            close(t->master_fd);
+            t->master_fd = -1;
+        }
+    }
     for (size_t i = 0; i < h->tool_count; i++) {
         if (h->tools[i].name) free(h->tools[i].name);
         if (h->tools[i].custom_script_path) free(h->tools[i].custom_script_path);

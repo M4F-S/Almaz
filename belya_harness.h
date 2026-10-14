@@ -5,6 +5,8 @@
 #include "linenoise.h"
 #include "mcp_client.h"
 #include <sys/socket.h>
+#include <stdint.h>
+#include <time.h>
 
 typedef enum {
     PERM_ALLOW,
@@ -26,6 +28,66 @@ typedef struct {
     char *custom_script_path;   // Non-null if tool is backed by an on-disk script
 } BelyaRegisteredTool;
 
+#define HARNESS_ACTION_HISTORY_SIZE 32
+#define HARNESS_LOOP_THRESHOLD_CYCLES 3
+
+typedef struct {
+    uint64_t action_hash;
+    char tool_name[48];
+    uint32_t return_code;
+    time_t timestamp;
+} HarnessActionRecord;
+
+typedef struct {
+    HarnessActionRecord history[HARNESS_ACTION_HISTORY_SIZE];
+    int head;
+    int count;
+    int consecutive_cycle_matches;
+    int detected_period;
+} HarnessLoopDetector;
+
+// 2026 Competitive Parity Phase 5: POSIX PTY Subshells & Background Task Manager
+#define BELYA_MAX_BACKGROUND_TASKS 16
+#define BELYA_TASK_RING_BUFFER_SIZE 65536
+
+typedef enum {
+    BELYA_TASK_STATE_UNUSED = 0,
+    BELYA_TASK_STATE_RUNNING,
+    BELYA_TASK_STATE_COMPLETED,
+    BELYA_TASK_STATE_FAILED,
+    BELYA_TASK_STATE_KILLED
+} BelyaTaskState;
+
+typedef struct {
+    int id;
+    pid_t pid;
+    pid_t pgid;
+    int master_fd;
+    BelyaTaskState state;
+    int exit_code;
+    time_t start_time;
+    time_t end_time;
+    char command[512];
+    char ring_buffer[BELYA_TASK_RING_BUFFER_SIZE];
+    size_t ring_head;
+    size_t ring_tail;
+    size_t ring_count;
+    size_t total_bytes_captured;
+} BelyaBackgroundTask;
+
+typedef struct {
+    BelyaBackgroundTask tasks[BELYA_MAX_BACKGROUND_TASKS];
+    size_t count;
+    int next_id;
+} BelyaTaskTable;
+
+// 2026 Competitive Parity Phase 7: Modular Remote Execution Backends
+typedef enum {
+    BELYA_BACKEND_LOCAL  = 0,
+    BELYA_BACKEND_DOCKER = 1,
+    BELYA_BACKEND_SSH    = 2
+} BelyaExecBackend;
+
 struct BelyaHarness {
     BelyaAgent *agent;
     BelyaRegisteredTool tools[64];
@@ -46,10 +108,28 @@ struct BelyaHarness {
     bool verification_performed_in_turn;
     bool verification_guard_tripped;
 
+    // In-Context Locking Breaker state (Late-2026 Attractor Detector)
+    HarnessLoopDetector loop_detector;
+    bool loop_breaker_tripped;
+
     // Belya Agency Tool Bounding & Role Guard state
     char active_role[64];
     bool bash_restricted;
     char tools_whitelist[512];
+
+    // 2026 Competitive Parity Phase 4: Plan Mode Gate & Git Worktree Sandbox
+    bool plan_mode;
+    char original_worktree_cwd[4096];
+    char active_worktree_path[4096];
+    bool in_worktree;
+
+    // 2026 Competitive Parity Phase 5: POSIX PTY Subshells & Background Task Manager
+    BelyaTaskTable task_table;
+
+    // 2026 Competitive Parity Phase 7: Modular Remote Execution Backends
+    BelyaExecBackend exec_backend;
+    char docker_container[128];
+    char ssh_host[128];
 };
 
 BelyaHarness *belya_harness_init(BelyaAgent *agent);
@@ -67,6 +147,7 @@ void belya_harness_repl(BelyaHarness *h);
 void belya_harness_execute_turn(BelyaHarness *h, const char *prompt);
 void belya_harness_reset_turn_state(BelyaHarness *h);
 bool belya_harness_record_tool_observation(BelyaHarness *h, const char *tool_name, const char *args_json, const char *observation, char **out_breaker_msg);
+int belya_harness_detect_loop(BelyaHarness *h, int *out_period);
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write);
 bool is_path_safe(const char *path);
 bool belya_harness_is_secret_path(const char *path);
@@ -80,7 +161,65 @@ void almaz_goals_generate_deterministic(BelyaHarness *h);
 bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);
 
+// Late-2026 Phase 3: AST Symbol Graph Navigation & ROMA Task Trees
+size_t belya_harness_index_symbols(BelyaHarness *h, const char *dir_path);
+char *belya_harness_goto_definition(BelyaHarness *h, const char *symbol_name);
+char *belya_harness_find_callers(BelyaHarness *h, const char *symbol_name);
+
+// Late-2026 Phase 3: Repo-to-MCP Dynamic Synthesis
+bool belya_harness_synthesize_mcp_server(BelyaHarness *h, const char *server_name, const char *tool_name, const char *desc, const char *script_cmd, const char *schema_json);
+
+// Late-2026 Phase 3: Mythos Variant Security Analysis
+char *belya_harness_audit_security_variants(BelyaHarness *h, const char *pattern_type, const char *target_path);
+
 void belya_harness_free(BelyaHarness *h);
+
+// 2026 Competitive Parity Phase 1: Stateful ANSI Diff Colorizer & Signal-Safe Modal
+char *belya_ansi_diff_colorize(const char *raw_diff);
+bool belya_terminal_permission_prompt(BelyaHarness *h, const char *tool_name, const char *args_json, void *userdata);
+
+// 2026 Competitive Parity Phase 2: Deterministic Lifecycle Hook Runner
+typedef enum {
+    BELYA_HOOK_PRE_TOOL_USE = 0,
+    BELYA_HOOK_POST_TOOL_USE,
+    BELYA_HOOK_STOP,
+    BELYA_HOOK_PRE_COMPACT
+} BelyaHookType;
+
+typedef struct {
+    bool blocked;           // True if hook returned exit code 2
+    int exit_code;          // Raw exit code
+    char *output;           // Hook output (heap-allocated, caller must free)
+} BelyaHookResult;
+
+BelyaHookResult belya_run_lifecycle_hook(BelyaHarness *h, BelyaHookType hook_type, const char *tool_name, const char *tool_args, const char *observation);
+void belya_hook_result_free(BelyaHookResult *res);
+
+// 2026 Competitive Parity Phase 4: Plan Mode Gate & Git Worktrees
+bool belya_harness_enter_plan_mode(BelyaHarness *h);
+bool belya_harness_exit_plan_mode(BelyaHarness *h);
+char *belya_harness_enter_worktree(BelyaHarness *h, const char *branch_or_id);
+char *belya_harness_leave_worktree(BelyaHarness *h, bool keep);
+
+// 2026 Competitive Parity Phase 5: POSIX PTY Subshells & Background Task Manager
+int belya_harness_spawn_task(BelyaHarness *h, const char *command);
+char *belya_harness_task_list(BelyaHarness *h);
+char *belya_harness_task_status(BelyaHarness *h, int id);
+char *belya_harness_task_send_input(BelyaHarness *h, int id, const char *input);
+char *belya_harness_task_kill(BelyaHarness *h, int id);
+
+// 2026 Competitive Parity Phase 6: Multi-Provider Web Search/Fetch, Byte-Span .ipynb Splicer & LSP-over-MCP
+char *belya_html_to_markdown(const char *html, size_t max_bytes);
+char *belya_harness_web_search(BelyaHarness *h, const char *query, const char *provider);
+char *belya_harness_web_fetch(BelyaHarness *h, const char *url, const char *extract_mode);
+char *belya_harness_edit_notebook(BelyaHarness *h, const char *path, const char *action, int cell_index, const char *cell_type, const char *source);
+char *belya_harness_lsp_definition(BelyaHarness *h, const char *file, int line, int character, const char *symbol);
+char *belya_harness_lsp_references(BelyaHarness *h, const char *file, int line, int character, const char *symbol);
+
+// 2026 Competitive Parity Phase 7: Omnichannel Gateway & Zero-Injection Remote Execution Backends
+void belya_harness_set_exec_backend(BelyaHarness *h, BelyaExecBackend backend, const char *target);
+char *belya_harness_exec_remote(BelyaHarness *h, const char *cmd, int *exit_code);
+char *belya_remote_exec_piped(BelyaExecBackend backend, const char *target, const char *workdir, const char *cmd, int *exit_code);
 
 extern const char *g_active_custom_script_path;
 
