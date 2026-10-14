@@ -1,6 +1,7 @@
 #ifndef BUDGET_STORE_H
 #define BUDGET_STORE_H
 
+#include "belya_common.h"
 #include <stdbool.h>
 #include <time.h>
 

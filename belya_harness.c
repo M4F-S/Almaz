@@ -339,6 +339,9 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
             dyn_str_append(&out, buf);
             if (out.len > 100000) {
                 dyn_str_append(&out, "\n[Output Truncated by Belya Harness (100KB buffer limit)]");
+                /* H6: reap the child instead of leaking a zombie bypassing timeout. */
+                kill(pid, SIGKILL);
+                waitpid(pid, NULL, 0);
                 break;
             }
         }
@@ -376,6 +379,9 @@ static char *tool_bash(BelyaAgent *agent, const JsonValue *args) {
     return out.data;
 }
 
+static char g_workspace_root[4096];
+static bool g_workspace_root_set = false;
+
 /* Secrets and operator state that file tools must never expose or mutate. */
 static bool is_secret_path(const char *path) {
     if (!path || path[0] == '\0') return false;
@@ -405,6 +411,11 @@ bool belya_harness_is_secret_path(const char *path) {
     return is_secret_path(path);
 }
 
+static bool whitelist_match(const char *resolved, const char *wl) {
+    size_t wlen = strlen(wl);
+    return strncmp(resolved, wl, wlen) == 0 && (resolved[wlen] == '\0' || resolved[wlen] == '/');
+}
+
 bool is_path_jailed(const char *path, const char *workspace_root, bool is_write) {
     if (!path || path[0] == '\0') return false;
 
@@ -419,6 +430,9 @@ bool is_path_jailed(const char *path, const char *workspace_root, bool is_write)
     char canonical_root[4096];
     if (workspace_root && workspace_root[0] != '\0') {
         strncpy(root_buf, workspace_root, sizeof(root_buf) - 1);
+        root_buf[sizeof(root_buf) - 1] = '\0';
+    } else if (g_workspace_root_set) {
+        strncpy(root_buf, g_workspace_root, sizeof(root_buf) - 1);
         root_buf[sizeof(root_buf) - 1] = '\0';
     } else {
         if (!getcwd(root_buf, sizeof(root_buf))) return false;
@@ -483,14 +497,18 @@ bool is_path_jailed(const char *path, const char *workspace_root, bool is_write)
         static const char *read_whitelist[] = {
             "/tmp/",
             "/private/tmp/",
-            "/proc/",
+            "/proc/self/status",
+            "/proc/self/cmdline",
+            "/proc/cpuinfo",
+            "/proc/meminfo",
+            "/proc/loadavg",
+            "/proc/uptime",
             "/dev/null",
             "/etc/os-release",
             NULL
         };
         for (int i = 0; read_whitelist[i]; i++) {
-            size_t wlen = strlen(read_whitelist[i]);
-            if (strncmp(resolved, read_whitelist[i], wlen) == 0) {
+            if (whitelist_match(resolved, read_whitelist[i])) {
                 return true;
             }
         }
@@ -510,14 +528,18 @@ bool is_path_jailed(const char *path, const char *workspace_root, bool is_write)
     static const char *read_whitelist[] = {
         "/tmp/",
         "/private/tmp/",
-        "/proc/",
+        "/proc/self/status",
+        "/proc/self/cmdline",
+        "/proc/cpuinfo",
+        "/proc/meminfo",
+        "/proc/loadavg",
+        "/proc/uptime",
         "/dev/null",
         "/etc/os-release",
         NULL
     };
     for (int i = 0; read_whitelist[i]; i++) {
-        size_t wlen = strlen(read_whitelist[i]);
-        if (strncmp(path, read_whitelist[i], wlen) == 0) {
+        if (whitelist_match(path, read_whitelist[i])) {
             return true;
         }
     }
@@ -2855,6 +2877,15 @@ BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_wh
     if (getcwd(h->cwd, sizeof(h->cwd)) == NULL) {
         snprintf(h->cwd, sizeof(h->cwd), ".");
     }
+    if (!g_workspace_root_set) {
+        char root_tmp[4096];
+        if (getcwd(root_tmp, sizeof(root_tmp))) {
+            if (!realpath(root_tmp, g_workspace_root)) {
+                snprintf(g_workspace_root, sizeof(g_workspace_root), "%s", root_tmp);
+            }
+            g_workspace_root_set = true;
+        }
+    }
     g_harness = h;
 
 #define REGISTER_IF_PERMITTED(t_name, t_desc, t_schema, t_sec, t_fn) \
@@ -3908,6 +3939,10 @@ char *belya_harness_enter_worktree(BelyaHarness *h, const char *branch_or_id) {
     if (!getcwd(h->cwd, sizeof(h->cwd))) {
         snprintf(h->cwd, sizeof(h->cwd), "%s", wt_path);
     }
+    if (!realpath(h->cwd, g_workspace_root)) {
+        snprintf(g_workspace_root, sizeof(g_workspace_root), "%s", h->cwd);
+    }
+    g_workspace_root_set = true;
     snprintf(h->active_worktree_path, sizeof(h->active_worktree_path), "%s", wt_path);
     h->in_worktree = true;
 
@@ -3928,6 +3963,10 @@ char *belya_harness_leave_worktree(BelyaHarness *h, bool keep) {
         return xstrdup("Error: Failed to restore original working directory.");
     }
     snprintf(h->cwd, sizeof(h->cwd), "%s", h->original_worktree_cwd);
+    if (!realpath(h->cwd, g_workspace_root)) {
+        snprintf(g_workspace_root, sizeof(g_workspace_root), "%s", h->cwd);
+    }
+    g_workspace_root_set = true;
     h->in_worktree = false;
 
     if (!keep) {
@@ -3946,7 +3985,7 @@ char *belya_harness_leave_worktree(BelyaHarness *h, bool keep) {
 // ==================== 2026 Competitive Parity Phase 5: POSIX PTY Background Task Manager ====================
 
 static void belya_task_ring_write(BelyaBackgroundTask *t, const char *data, size_t len) {
-    if (!t || !data || len == 0) return;
+    if (!t || !t->ring_buffer || !data || len == 0) return;
     for (size_t i = 0; i < len; i++) {
         t->ring_buffer[t->ring_head] = data[i];
         t->ring_head = (t->ring_head + 1) % BELYA_TASK_RING_BUFFER_SIZE;
@@ -3960,7 +3999,7 @@ static void belya_task_ring_write(BelyaBackgroundTask *t, const char *data, size
 }
 
 static char *belya_task_ring_read_all(BelyaBackgroundTask *t) {
-    if (!t || t->ring_count == 0) return xstrdup("");
+    if (!t || !t->ring_buffer || t->ring_count == 0) return xstrdup("");
     char *out = malloc(t->ring_count + 1);
     if (!out) return xstrdup("");
     for (size_t i = 0; i < t->ring_count; i++) {
@@ -4023,6 +4062,11 @@ int belya_harness_spawn_task(BelyaHarness *h, const char *command) {
         }
     }
     if (slot < 0) return -1;
+
+    if (!h->task_table.tasks[slot].ring_buffer) {
+        h->task_table.tasks[slot].ring_buffer = calloc(1, BELYA_TASK_RING_BUFFER_SIZE);
+        if (!h->task_table.tasks[slot].ring_buffer) return -1;
+    }
 
     int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
     if (master_fd < 0) return -1;
@@ -6370,6 +6414,10 @@ void belya_harness_free(BelyaHarness *h) {
         } else if (t->master_fd > STDERR_FILENO) {
             close(t->master_fd);
             t->master_fd = -1;
+        }
+        if (t->ring_buffer) {
+            free(t->ring_buffer);
+            t->ring_buffer = NULL;
         }
     }
     for (size_t i = 0; i < h->tool_count; i++) {
