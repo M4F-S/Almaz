@@ -116,7 +116,9 @@ int main(int argc, char **argv) {
             printf("Usage: almaz [OPTIONS]\n\n");
             printf("Options:\n");
             printf("  -h, --help                 Show this help message\n");
-            printf("  -t, --telegram             Run as Telegram bot daemon\n");
+            printf("  -t, --telegram             Run as Telegram (+ Omnichannel) bot daemon\n");
+            printf("  -o, --omnichannel          Alias for --telegram omnichannel daemon mode\n");
+            printf("  -d, --docker <container>   Execute bash commands inside Docker sandbox container\n");
             printf("  -a, --agency [prompt]      Execute task via multi-agent agency pipeline\n");
             printf("  -r, --resume <session_id>  Resume saved conversation session\n");
             printf("  -p, --prompt <prompt>      Execute headless mission prompt and exit\n");
@@ -124,8 +126,12 @@ int main(int argc, char **argv) {
             printf("  --eval <prompt>            Alias for --prompt\n");
             printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n\n");
             return 0;
-        } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0) {
+        } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0 ||
+                   strcmp(argv[i], "--omnichannel") == 0 || strcmp(argv[i], "-o") == 0) {
             telegram_mode = true;
+        } else if ((strcmp(argv[i], "--docker") == 0 || strcmp(argv[i], "-d") == 0) && i + 1 < argc) {
+            setenv("EXEC_BACKEND", "docker", 1);
+            setenv("DOCKER_CONTAINER", argv[++i], 1);
         } else if (strcmp(argv[i], "--agency") == 0 || strcmp(argv[i], "-a") == 0) {
             agency_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') {

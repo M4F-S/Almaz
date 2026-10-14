@@ -2967,6 +2967,15 @@ BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_wh
     if (getcwd(h->cwd, sizeof(h->cwd)) == NULL) {
         snprintf(h->cwd, sizeof(h->cwd), ".");
     }
+    /* Auto-configure remote execution backend (Docker / SSH) from environment if set */
+    const char *eb_env = getenv("EXEC_BACKEND");
+    const char *dc_env = getenv("DOCKER_CONTAINER");
+    const char *ssh_env = getenv("SSH_HOST");
+    if (eb_env && strcasecmp(eb_env, "docker") == 0) {
+        belya_harness_set_exec_backend(h, BELYA_BACKEND_DOCKER, (dc_env && strlen(dc_env) > 0) ? dc_env : "almaz-sandbox");
+    } else if (eb_env && strcasecmp(eb_env, "ssh") == 0 && ssh_env && strlen(ssh_env) > 0) {
+        belya_harness_set_exec_backend(h, BELYA_BACKEND_SSH, ssh_env);
+    }
     if (!g_workspace_root_set) {
         char root_tmp[4096];
         if (getcwd(root_tmp, sizeof(root_tmp))) {
