@@ -51,7 +51,7 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
 - [Operating Modes](#operating-modes)
 - [What is real / what is marketing](#what-is-real--what-is-marketing)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (54/54 Passed - 100%)](#1-unit-test-suite-5454-passed---100)
+  - [1. Unit Test Suite (61/61 Passed - 100%)](#1-unit-test-suite-6161-passed---100)
   - [2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)](#2-hidden-holdout-regression-suite-6565-assertions---100)
   - [3. SQLite Integrity & WAL Self-Test (--selfest)](#3-sqlite-integrity--wal-self-test---selfest)
   - [4. Zero-Tolerance Memory Safety (ASan/UBSan)](#4-zero-tolerance-memory-safety-asanubsan)
@@ -129,7 +129,7 @@ Almaz is evaluated across a rigorous **6-arena, 36-task comprehensive benchmark 
 
 ### 2. Arena-by-Arena Autopoietic Capabilities
 
-- **Arena 1 (Berkeley Function Calling Leaderboard / BFCL Alignment):** Standard schemas, reasoning-embedded `<think>` extraction, ReAct action models, parallel execution, and strict argument contract enforcement across 22 tools.
+- **Arena 1 (Berkeley Function Calling Leaderboard / BFCL Alignment):** Standard schemas, reasoning-embedded `<think>` extraction, ReAct action models, parallel execution, and strict argument contract enforcement across 41 tools.
 - **Arena 2 (Aider Polyglot Code Editing):** Targeted AST replacements across 5 programming languages with the **Pre-Flight Compiler Watchdog** auto-reverting syntax errors.
 - **Arena 3 (Gomaa Memory & Long Dialogue Retention):** SQLite FTS5 multi-room domain isolation (`wing/room`), deduplication, rollback state machine, and **50-turn needle-in-a-haystack recall** with 100% precision.
 - **Arena 4 (SWE-bench Simulation):** Per-file-capped symbol discovery (`search_files`), multi-hunk patch application (`apply_patch`), Git working tree tracking, and structured subagent execution envelopes.
@@ -138,7 +138,7 @@ Almaz is evaluated across a rigorous **6-arena, 36-task comprehensive benchmark 
   - **Peak Resident Memory (RSS):** **`9.84 MB`** (macOS) / **`12.50 MB`** (VPS) (<25MB target)
   - **JSON Serialization/Parsing:** **`1.47 µs/op`** (>680,000 JSON ops/sec)
   - **Continuous Leak Profile:** **`0 KB Delta (Zero Leaks)`** across 1,000 continuous tool iterations
-  - **Standalone Binary Footprint:** **`312.2 KB`** (macOS) / **`330.5 KB`** (VPS) (<500KB target)
+  - **Standalone Binary Footprint:** **`285.1 KB`** (macOS) / **`295.4 KB`** (VPS) (<500KB target)
 - **Arena 6 (Late-2026 Autopoietic & SOTA Cognitive Architecture):**
   - **`[6.1]` In-Context Attractor Loop Breaker:** 64-bit FNV-1a hash ring detects and severs periodic loops ($k \in \{1, 2, 3\}$).
   - **`[6.2]` Middle-Out Context Compactor & Root Pinning:** Locks Zone 1 directives and archives middle turns to SQLite (`session_messages_archived`).
@@ -151,7 +151,7 @@ Almaz is evaluated across a rigorous **6-arena, 36-task comprehensive benchmark 
 
 ### 3. Frontier Agent Architectural Comparison
 
-| Architectural Feature | **Almaz v0.8.0 (C99)** | **Devin** | **OpenHands** | **SWE-agent** | **Aider** |
+| Architectural Feature | **Almaz v2.1.0 (C99)** | **Devin** | **OpenHands** | **SWE-agent** | **Aider** |
 |:---|:---:|:---:|:---:|:---:|:---:|
 | **Core Runtime** | **Pure C99 POSIX** | Proprietary | Python / Docker | Python | Python CLI |
 | **RAM Footprint (RSS)** | **< 3.5 MB Idle / 12.5 MB Peak** | ~800 MB (Cloud) | ~1,500 MB | ~450 MB | ~250 MB |
@@ -163,7 +163,7 @@ Almaz is evaluated across a rigorous **6-arena, 36-task comprehensive benchmark 
 | **Compiler Watchdog** | **Pre-Flight Guard (Auto-Revert)** | Post-Run Test | Post-Run Test | Post-Run Test | Linter Check |
 | **Code Navigation** | **SQLite AST Symbol Graph (`18ms`)** | LSP / Grep | Grep / Bash | Grep | Tree-sitter Map |
 | **Holdout Safety Suite** | **AIDE² 65-Assertion Battery** | Proprietary | None | None | None |
-| **Executable Size** | **`330.5 KB` Binary** | Cloud Only | 4.2 GB Docker Image | 650 MB Env | 180 MB Env |
+| **Executable Size** | **`285.1 KB` Binary** | Cloud Only | 4.2 GB Docker Image | 650 MB Env | 180 MB Env |
 
 ---
 
@@ -445,7 +445,7 @@ and a scorecard is only as trustworthy as the instrument behind it.
 
 ## Automated Verification & Test Suites
 
-### 1. Unit Test Suite (54/54 Passed - 100%)
+### 1. Unit Test Suite (61/61 Passed - 100%)
 ```bash
 make test
 ```
@@ -456,7 +456,7 @@ make test
 [Test] MiniJSON Parser & Serializer...
   -> MiniJSON PASSED
 [Test] BPE-calibrated Token Estimator...
-  -> Token Estimator PASSED (Total: 853 tokens)
+  -> Token Estimator PASSED (Total: 1103 tokens)
 [Test] Agent Memory (FTS5) & Rules Auto-Discovery...
   -> Agent Memory & Rules PASSED
 [Test] Session Checkpointing & Resumption...
@@ -502,7 +502,7 @@ make test
 [Test] Subagent Recursion Guard & Sandbox Tool Isolation...
   -> Subagent Recursion Guard PASSED
 [Test] Self-Telemetry, RSS Calculation & Proprioception...
-  -> Self-Telemetry & Proprioception PASSED (RSS: 122.78 MB)
+  -> Self-Telemetry & Proprioception PASSED (RSS: 11.81 MB)
 [Test] Metacognitive Circuit Breaker & Verification Guard...
   -> Metacognitive Circuit Breaker & Verification Guard PASSED
 [Test] Track A.1: Workspace Path Jailing (is_path_jailed)...
@@ -510,7 +510,7 @@ make test
 [Test] Track A.2: C99 Markdown Frontmatter Parser (minifrontmatter)...
   -> C99 Markdown Frontmatter Parser PASSED
 [Test] Track A.3: File-First Skills System (skills/*/SKILL.md)...
-  -> File-First Skills System PASSED (Loaded 4 disk skills)
+  -> File-First Skills System PASSED (Loaded 9 disk skills)
 [Test] Track A.4: Composable Rule Packs (rules/*/*.md)...
   -> Composable Rule Packs PASSED (Loaded 3 rule packs)
 [Test] Track A.5: Systematic TROUBLESHOOTING.md Pattern Resolver...
@@ -554,12 +554,26 @@ make test
 [Test] Late-2026 ROMA Recursive Context Firewall...
   -> Late-2026 ROMA Recursive Context Firewall PASSED
 [Test] Late-2026 AST Symbol Graph Navigation & Call-Tree...
-  -> Late-2026 AST Symbol Graph Navigation PASSED (8913 symbols indexed)
+  -> Late-2026 AST Symbol Graph Navigation PASSED (11552 symbols indexed)
 [Test] Late-2026 Paper2Agent Repo-to-MCP Dynamic Synthesis...
   -> Late-2026 Paper2Agent Repo-to-MCP Synthesis PASSED
 [Test] Late-2026 Mythos Variant Security Sweeper...
   -> Late-2026 Mythos Variant Security Sweeper PASSED
-================ All Tests Passed Successfully (54/54 - 100%) ================
+[Test] Phase 1: Stateful Diff Colorizer, ask_user & Signal-Safe Modal...
+  -> Phase 1: Stateful Diff Colorizer, ask_user & Signal-Safe Modal PASSED
+[Test] Phase 2: Deterministic Hooks, 5-Tier Compactor & Dynamic Cache Boundary...
+  -> Phase 2: Deterministic Hooks, 5-Tier Compactor & Dynamic Cache Boundary PASSED
+[Test] Phase 3: Task Board, FTS5 Recall & Background Cron Engine...
+  -> Phase 3: Task Board, FTS5 Recall & Background Cron Engine PASSED
+[Test] Phase 4: Plan Mode Sandbox, Isolated Git Worktrees & SKILL.md Parity...
+  -> Phase 4: Plan Mode Sandbox, Isolated Git Worktrees & SKILL.md Parity PASSED
+[Test] Phase 5: POSIX PTY Subshells & Background Task Manager...
+  -> Phase 5: POSIX PTY Subshells & Background Task Manager PASSED
+[Test] Phase 6: Web Search/Fetch, Notebook Splicer & LSP-over-MCP...
+  -> Phase 6: Web Search/Fetch, Notebook Splicer & LSP-over-MCP PASSED
+[Test] Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends...
+  -> Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends PASSED
+================ All Tests Passed Successfully (61/61 - 100%) ================
 ```
 
 ### 2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)
@@ -623,9 +637,20 @@ MODEL_API_KEY=oc_sk_your-opencode-key
 # MODEL_NAME=deepseek/deepseek-v4.1-flash
 # MODEL_API_KEY=sk-or-v1-your-key
 
-# Telegram Bot Credentials
+# Channel A: Telegram Bot
 TELEGRAM_BOT_TOKEN=123456789:ABCDefGhIJKlmNoPQRsTUVwxyZ
 TELEGRAM_CHAT_ID=7934918808
+
+# Channel B: Discord Bot (Optional)
+DISCORD_BOT_TOKEN=MTE5...your-discord-token
+DISCORD_CHANNEL_ID=123456789012345678
+
+# Channel C: Slack Bot (Optional)
+SLACK_BOT_TOKEN=xoxb-...your-slack-bot-token
+SLACK_CHANNEL_ID=C0123456789
+
+# Execution Sandbox (Optional - Local, Docker, or Remote SSH)
+# DOCKER_CONTAINER=almaz-sandbox
 
 # Jev TypeSafe AI Decision Coprocessor (Optional)
 JEV_API_KEY=jev_sk_your-key
@@ -681,11 +706,11 @@ Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and
 
 ### 🧬 Sibling Lineage & Mutual Hardening
 - **Belya (The Deterministic Sibling & Software Engineering Core)**:
-  Maintained in [`M4F-S/Belya`](https://github.com/M4F-S/Belya), deployed 24/7 on the VPS at `/opt/charness` (symlinked `/opt/belya`) as `belya.service`. Belya is the production engineering core designed for absolute predictability, deterministic test generation, and sub-millisecond execution. It serves as Almaz's rock-solid foundation, providing pristine reference architectures and security harness primitives.
+  Maintained in [`M4F-S/Belya`](https://github.com/M4F-S/Belya), deployed 24/7 on the VPS at `/opt/belya` as `belya.service`. Belya is the production engineering core designed for absolute predictability, deterministic test generation, and sub-millisecond execution. It serves as Almaz's rock-solid foundation, providing pristine reference architectures and security harness primitives.
 - **Almaz (The Metamorphic Sibling & Cognitive Organism)**:
   Maintained in [`M4F-S/Almaz`](https://github.com/M4F-S/Almaz), deployed 24/7 on the VPS at `/opt/almaz` as `almaz.service` supervised by `almaz-watchdog`. Almaz takes Belya's deterministic foundation and elevates it into an autopoietic organism: a biological computing loop featuring biological memory decay (FadeMem), dual-stream tactical/strategic memory routing (CORAL), semantic fact extraction (SimpleMem), a persistent self-model (SARSI), emotional appraisal dynamics (VIGIL), situational memory gating (KnowSelf), soft-constraint relaxation, and Darwinian AST code mutation guarded by 65 hidden holdout assertions.
 - **Continuous Cross-Sibling Co-Evolution**:
-  Both siblings continuously exchange hardening advances. Security enhancements first proven in Belya (such as H4 orphaned tool message stripping, H5 SQLite WAL batching, and socket-level SSRF filters) are ported into Almaz. Conversely, telemetry innovations created in Almaz (such as H2 SSE usage accounting, linear streaming `memcpy` assembly, and Darwin compatibility) are backported to Belya. In the nightly arena benchmark, both siblings test mutations symmetrically without bias.
+  Both siblings continuously exchange hardening advances. Security enhancements first proven in Belya (such as H4 orphaned tool message stripping, H5 SQLite WAL batching, socket-level SSRF filters, kernel Plan Mode sandboxing, and omnichannel gateway polling) are ported into Almaz. Conversely, telemetry innovations created in Almaz (such as H2 SSE usage accounting, linear streaming `memcpy` assembly, and Darwin compatibility) are backported to Belya. In the nightly arena benchmark, both siblings test mutations symmetrically without bias.
 
 ---
 
