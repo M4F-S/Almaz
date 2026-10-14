@@ -44,11 +44,15 @@ $(TEST_TARGET): $(TEST_SRCS)
 holdout: $(HOLDOUT_TARGET)
 	./$(HOLDOUT_TARGET)
 
+test-holdout: holdout
+
 $(HOLDOUT_TARGET): $(HOLDOUT_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(HOLDOUT_SRCS) $(LIBS)
 
 benchmark: $(BENCHMARK_TARGET) $(TARGET)
 	./$(BENCHMARK_TARGET)
+
+arena: benchmark
 
 $(BENCHMARK_TARGET): $(BENCHMARK_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(BENCHMARK_SRCS) $(LIBS)
@@ -59,4 +63,4 @@ clean:
 gdrive:
 	@./scripts/sync_to_gdrive.sh
 
-.PHONY: all test holdout benchmark clean gdrive
+.PHONY: all test holdout test-holdout benchmark arena clean gdrive
