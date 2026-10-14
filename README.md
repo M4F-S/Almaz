@@ -1,19 +1,19 @@
 # Almaz — Sovereign Self-Evolving, Self-Healing Autonomous AI Organism (Pure C99)
 
-[![Release](https://img.shields.io/badge/Release-v0.8.0-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v0.8.0)
+[![Release](https://img.shields.io/badge/Release-v2.1.0-blue.svg)](https://github.com/M4F-S/Almaz/releases/tag/v2.1.0-phase7)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/Language-C99-orange.svg)]()
-[![Tests](https://img.shields.io/badge/Unit_Tests-54%2F54_Passed_(100%25)-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/Unit_Tests-61%2F61_Passed_(100%25)-brightgreen.svg)]()
 [![Holdout](https://img.shields.io/badge/AIDE%C2%B2_Holdout-65%2F65_Assertions_(100%25)-brightgreen.svg)]()
 [![Benchmarks](https://img.shields.io/badge/6--Arena_Benchmarks-36%2F36_Passed_(100%25)-success.svg)]()
 [![Compiler](https://img.shields.io/badge/Compiler-0_Warnings_Clean-brightgreen.svg)]()
 [![Safety](https://img.shields.io/badge/Memory_Safety-0_Leaks_ASan_Clean-success.svg)]()
-[![Tools](https://img.shields.io/badge/Native_Tools-22_Tools-informational.svg)]()
+[![Tools](https://img.shields.io/badge/Native_Tools-41_Tools-informational.svg)]()
 [![Watchdog](https://img.shields.io/badge/Watchdog-VIGIL_Self--Healing-success.svg)]()
 [![Memory](https://img.shields.io/badge/Memory_Footprint-<12.5MB_Peak_RSS-purple.svg)]()
 [![Binary](https://img.shields.io/badge/Binary_Size-~330KB-informational.svg)]()
 
-Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Almaz is the **autopoietic cognitive twin sibling** of **Belya** (the deterministic software engineering core). While Belya champions rock-solid deterministic code generation and execution harness precision, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), biological memory decay (**FadeMem**), dual-stream tactical/strategic memory routing (**CORAL**), de-linearized semantic fact extraction (**SimpleMem**), a persistent self-model (**SARSI**), an emotional appraisal state machine (**VIGIL** protocol), situational memory gating (**KnowSelf**), soft-constraint relaxation for critical remediation, a 65-assertion hidden holdout regression harness (AIDE² safety framework), dual-tier model gateway failover, and Darwinian AST self-evolution.
+Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** implemented in pure C99. Almaz is the **autopoietic cognitive twin sibling** of **Belya** (the deterministic software engineering core). While Belya champions rock-solid deterministic code generation and execution harness precision, Almaz operates under an autopoietic biological computing model: an introspective reasoning core continuously guarded by a dedicated POSIX sibling watchdog (`almaz-watchdog`), biological memory decay (**FadeMem**), dual-stream tactical/strategic memory routing (**CORAL**), de-linearized semantic fact extraction (**SimpleMem**), a persistent self-model (**SARSI**), an emotional appraisal state machine (**VIGIL** protocol), situational memory gating (**KnowSelf**), soft-constraint relaxation for critical remediation, a 65-assertion hidden holdout regression harness (AIDE² safety framework), dual-tier model gateway failover, competitive parity (Phases 0–7: 41 native tools, PTY subshells, task board, cron, plan mode, worktrees, web search, notebook splicer, LSP-over-MCP, omnichannel gateway, remote backends), and Darwinian AST self-evolution.
 
 ---
 
@@ -46,7 +46,7 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
   - [18. Production Hardening: H4 Tool Stripping & H5 WAL Batching](#18-production-hardening-h4-tool-stripping--h5-wal-batching)
   - [19. SSRF Defense & Secret Path Jailing](#19-ssrf-defense--secret-path-jailing)
   - [20. Production Canary Promotion Architecture (promote.sh)](#20-production-canary-promotion-architecture-promotesh)
-- [Native Tool Suite (22 Built-In Tools)](#native-tool-suite-22-built-in-tools)
+- [Native Tool Suite (41 Built-In Tools)](#native-tool-suite-41-built-in-tools)
 - [Command & Slash Controls Reference](#command--slash-controls-reference)
 - [Operating Modes](#operating-modes)
 - [What is real / what is marketing](#what-is-real--what-is-marketing)
@@ -292,11 +292,11 @@ Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools
 
 ---
 
-## Native Tool Suite (22 Built-In Tools)
+## Native Tool Suite (41 Built-In Tools)
 
 | Tool Name | Parameters | Description |
 |:---|:---|:---|
-| **`bash`** | `command` (str) | Executes shell commands with persistent CWD tracking & timeout protection |
+| **`bash`** | `command` (str), `background` (bool) | Executes shell commands with persistent CWD tracking, PTY subshell virtualization, & timeout protection |
 | **`read_file`** | `path` (str), `offset` (num), `limit` (num) | Reads file contents with line-number slicing |
 | **`write_file`** | `path` (str), `content` (str) | Writes text directly to disk with pre-flight compiler syntax check |
 | **`edit_file`** | `path`, `old_text`, `new_text`, `verify_compile` (bool) | Exact search-and-replace edit with compiler verification guard and auto-revert |
@@ -318,6 +318,25 @@ Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools
 | **`spawn_subagent`**| `task` (str), `instructions` (str), `max_turns` (num) | Spawns isolated worker subagent and returns structured execution envelope |
 | **`define_tool`** | `name`, `description`, `parameters`, `script_body` | Dynamically creates, scripts, persists, and registers new executable tools with full parameter contracts |
 | **`dispatch_agent`**| `role` (str), `task` (str), `context` (str) | Dispatches specialized subagent bounded by declarative manifest with automatic Git Rollback Guard |
+| **`ask_user`** | `question` (str), `options` (arr), `is_multi_select` (bool) | Prompts operator with raw signal-safe interactive terminal modal or rich Telegram inline keyboard |
+| **`task_create`** | `title` (str), `description` (str), `priority` (str), `depends_on` (arr) | Registers a structured task on the SQLite task board with dependency graph tracking |
+| **`task_update`** | `task_id` (str), `status` (str), `notes` (str) | Updates lifecycle state (`pending`, `in_progress`, `completed`, `failed`) and notes on the task board |
+| **`task_list`** | `status` (str), `limit` (num) | Lists tasks from SQLite board with optional status filtering and dependency resolution |
+| **`task_get`** | `task_id` (str) | Retrieves complete task details, execution notes, and dependency graph |
+| **`cron_create`** | `name` (str), `schedule_expr` (str), `action_prompt` (str) | Registers a recurring background cron job in SQLite |
+| **`cron_list`** | *(none)* | Lists all active background cron jobs, intervals, next fire time, and trigger history |
+| **`cron_tick`** | *(none)* | Immediately evaluates and fires all due background cron jobs |
+| **`enter_plan_mode`** | *(none)* | Enters read-only Plan Mode security sandbox, locking all mutating filesystem and shell operations |
+| **`exit_plan_mode`** | *(none)* | Exits Plan Mode sandbox, restoring full read-write execution privileges |
+| **`enter_worktree`** | `name` (str), `base_branch` (str) | Spawns and switches into an isolated Git worktree for zero-risk speculative refactoring |
+| **`leave_worktree`** | `discard_changes` (bool) | Leaves isolated Git worktree sandbox and restores original working directory and branch |
+| **`manage_task`** | `action` (str), `task_id` (str), `input` (str) | Manages background PTY subshell processes (`list`, `status`, `send_input`, `kill`) |
+| **`web_search`** | `query` (str), `provider` (str), `max_results` (num) | Multi-provider streaming web retrieval (Tavily, Brave, SerpApi, SearXNG) |
+| **`web_fetch`** | `url` (str), `extract_markdown` (bool) | Fetches URL with SSRF protection, size clamps (50KB), and extracts clean markdown |
+| **`edit_notebook`** | `path` (str), `action` (str), `cell_index` (num), `content` (str) | Byte-span Jupyter notebook (`.ipynb`) cell editor preserving cell execution counts and metadata |
+| **`lsp_definition`** | `path` (str), `symbol` (str), `line` (num), `col` (num) | Navigates to symbol definition via LSP-over-MCP with native AST fallback |
+| **`lsp_references`** | `path` (str), `symbol` (str) | Finds all references to a symbol via LSP-over-MCP with native AST fallback |
+| **`exec_backend`** | `action` (str), `backend_type` (str), `target` (str) | Inspects or switches execution backend (local, Docker container, or SSH host) via stdin-piped execution |
 
 ---
 
@@ -345,6 +364,11 @@ Almaz guarantees zero-downtime, crash-free VPS deployments via `/opt/almaz/tools
 | `/cwd [path]` | CLI & Telegram | View or change current working directory |
 | `/mcp <cmd>` | CLI & Telegram | Connect to an external stdio MCP server |
 | `/agency <prompt>` | CLI & Telegram | Execute task using Belya Agency multi-agent pipeline (Triage → Architect → Builder → Tester) |
+| `/diff` | CLI | Render stateful syntax-highlighted ANSI diff of working tree changes |
+| `/doctor` | CLI | Run deep diagnostics on toolchain, SQLite WAL, sanitizers, and memory health |
+| `/cost` | CLI | View real-time token expenditure, cache hit rates, and dollar savings |
+| `/plan` | CLI | Toggle read-only Plan Mode sandbox on/off |
+| `/cron` | CLI | List registered cron jobs and view trigger schedules |
 
 ---
 
@@ -580,7 +604,7 @@ Compiled and tested under AddressSanitizer and UndefinedBehaviorSanitizer:
 make clean && make test CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 make holdout CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 ```
-**Result: 54/54 unit tests and 65/65 holdout assertions pass with 0 memory leaks, 0 heap buffer overflows, and 0 undefined behavior.**
+**Result: 61/61 unit tests and 65/65 holdout assertions pass with 0 memory leaks, 0 heap buffer overflows, and 0 undefined behavior.**
 
 
 ---
@@ -643,15 +667,15 @@ Almaz and Belya are **twin sovereign C99 siblings** sharing a common lineage and
        ┌──────────────────────────┐     ┌──────────────────────────┐
        │   GitHub: M4F-S/Belya    │     │   GitHub: M4F-S/Almaz    │
        │   (Deterministic Core)   │     │  (Metamorphic Organism)  │
-       │       Tag: v7.2.0        │     │        Tag: v0.8.0       │
-       │     Path: /opt/charness  │     │     Path: /opt/almaz     │
+       │       Tag: v2.1.0        │     │       Tag: v2.1.0        │
+       │     Path: /opt/belya     │     │     Path: /opt/almaz     │
        │    Service: belya.service│     │    Service: almaz.service│
        └────────────┬─────────────┘     └────────────┬─────────────┘
                     │                                │
                     ▼                                ▼
         [Deterministic Software ]        [Autonomous Self-Evolving]
         [Engineering Workhorse  ]        [Self-Healing Organism   ]
-        [41 Tests / ASan Clean  ]        [54 Tests + 65 Holdouts  ]
+        [48 Tests / ASan Clean  ]        [61 Tests + 65 Holdouts  ]
         [Production Deployments ]        [FadeMem + CORAL + VIGIL ]
 ```
 
