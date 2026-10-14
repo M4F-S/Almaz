@@ -1,6 +1,13 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
-LIBS = -lcurl -lsqlite3 -lm
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    DEAD_STRIP = -Wl,-dead_strip
+else
+    DEAD_STRIP = -Wl,--gc-sections
+endif
+OPT_SIZE := $(shell $(CC) -Oz -E -x c /dev/null >/dev/null 2>&1 && echo -Oz || echo -Os)
+CFLAGS = -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 $(OPT_SIZE) -ffunction-sections -fdata-sections -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
+LIBS = $(DEAD_STRIP) -lcurl -lsqlite3 -lm
 
 SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c main.c
 OBJS = $(SRCS:.c=.o)
@@ -23,7 +30,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
 
 $(WATCHDOG_TARGET): watchdog.c
-	$(CC) $(CFLAGS) -o $@ watchdog.c -lcurl
+	$(CC) $(CFLAGS) -o $@ watchdog.c $(DEAD_STRIP) -lcurl
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -53,4 +60,3 @@ gdrive:
 	@./scripts/sync_to_gdrive.sh
 
 .PHONY: all test holdout benchmark clean gdrive
-

@@ -10,7 +10,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 
-/* R1 (2026-10-10): fail-fast strdup. NULL-in -> NULL-out; OOM -> log + abort.
+/* R1 (2026-10-11): fail-fast strdup. NULL-in -> NULL-out; OOM -> log + abort.
    A supervised daemon must never dereference a NULL returned by a failed dup. */
 static inline char *xstrdup(const char *s) {
     if (!s) return NULL;
@@ -79,7 +79,7 @@ static inline void dyn_str_append_len(DynString *ds, const char *str, size_t sle
     ds->data[ds->len] = '\0';
 }
 
-static inline void dyn_str_appendf(DynString *ds, const char *fmt, ...) {
+static inline BELYA_PRINTF_FMT(2, 3) void dyn_str_appendf(DynString *ds, const char *fmt, ...) {
     if (!fmt) return;
     va_list ap;
     va_start(ap, fmt);

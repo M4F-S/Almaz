@@ -1,6 +1,7 @@
 #ifndef HEALTH_WATCHER_H
 #define HEALTH_WATCHER_H
 
+#include "belya_common.h"
 #include <time.h>
 #include "belya_agent.h"
 #include "model_adapter.h"
