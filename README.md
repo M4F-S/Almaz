@@ -51,7 +51,7 @@ Almaz is a **sovereign self-evolving, self-healing autonomous AI organism** impl
 - [Operating Modes](#operating-modes)
 - [What is real / what is marketing](#what-is-real--what-is-marketing)
 - [Automated Verification & Test Suites](#automated-verification--test-suites)
-  - [1. Unit Test Suite (61/61 Passed - 100%)](#1-unit-test-suite-6161-passed---100)
+  - [1. Unit Test Suite (62/62 Passed - 100%)](#1-unit-test-suite-6262-passed---100)
   - [2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)](#2-hidden-holdout-regression-suite-6565-assertions---100)
   - [3. SQLite Integrity & WAL Self-Test (--selfest)](#3-sqlite-integrity--wal-self-test---selfest)
   - [4. Zero-Tolerance Memory Safety (ASan/UBSan)](#4-zero-tolerance-memory-safety-asanubsan)
@@ -445,7 +445,7 @@ and a scorecard is only as trustworthy as the instrument behind it.
 
 ## Automated Verification & Test Suites
 
-### 1. Unit Test Suite (61/61 Passed - 100%)
+### 1. Unit Test Suite (62/62 Passed - 100%)
 ```bash
 make test
 ```
@@ -573,7 +573,7 @@ make test
   -> Phase 6: Web Search/Fetch, Notebook Splicer & LSP-over-MCP PASSED
 [Test] Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends...
   -> Phase 7: Omnichannel Gateway & Stdin-Piped Remote Backends PASSED
-================ All Tests Passed Successfully (61/61 - 100%) ================
+================ All Tests Passed Successfully (62/62 - 100%) ================
 ```
 
 ### 2. Hidden Holdout Regression Suite (65/65 Assertions - 100%)
@@ -618,7 +618,7 @@ Compiled and tested under AddressSanitizer and UndefinedBehaviorSanitizer:
 make clean && make test CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 make holdout CFLAGS="-Wall -Wextra -O2 -std=c99 -fsanitize=address,undefined -g -D_POSIX_C_SOURCE=200809L"
 ```
-**Result: 61/61 unit tests and 65/65 holdout assertions pass with 0 memory leaks, 0 heap buffer overflows, and 0 undefined behavior.**
+**Result: 62/62 unit tests and 65/65 holdout assertions pass with 0 memory leaks, 0 heap buffer overflows, and 0 undefined behavior.**
 
 
 ---

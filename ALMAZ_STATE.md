@@ -1,8 +1,16 @@
 # 💎 Almaz Sovereign Software Organism: Project State & Session Handoff
 
+> **⚠️ VERIFIED STATE — 2026-10-15** (measured on the live VPS, not copied from earlier docs)
+> - **Deployed commit:** `76142e7` (branch `main`, == `origin/main`)
+> - **Deployed artifact:** `/opt/almaz/almaz`, sha256 `504247a4…`, 340,088 B; provenance in `.deploy_meta` (DEPLOY_SEQ 7) is **hash-verified against the running image**
+> - **Verified by:** rebuilding `76142e7` from GitHub — output was byte-identical to the running binary
+> - **Tests at this commit:** **62/62** (`make test`) + **65/65** (holdout). **Tools:** 41.
+> - **Host:** Linux x86-64 (Ubuntu 24.04 VPS). macOS ARM64 appears below only as a dev-host note.
+> - Numbers further down this file that disagree with the block above are **stale** — the block wins.
+
 **Repository:** `M4F-S/Almaz`  
 **Current Version:** `v2.1.0-phase7` (Competitive Parity & Late-2026 Sovereign Organism)  
-**Host Environment:** macOS (Darwin ARM64) & Remote VPS Ubuntu 24.04 (`187.124.2.26`)  
+**Host Environment:** Remote VPS Ubuntu 24.04, Linux x86-64 (`187.124.2.26`) — the repo also builds on macOS (Darwin ARM64) dev hosts; **this deployment is Linux**  
 **Deployment Daemon:** `/opt/almaz/almaz` under `almaz.service` (supervised by `almaz-watchdog`)  
 **Active Inference Engine:** `deepseek-v4.1-flash` via OpenCode Go Flat-Rate Gateway  
 **Memory Architecture:** SQLite 3 with FTS5, Gomaa Scoped Wings, FadeMem biological decay, CORAL dual-stream routing, and WAL Mode (`almaz_memory.sqlite`)  
@@ -63,10 +71,10 @@ Almaz seamlessly incorporates all 41 native tools and capabilities from the Comp
 
 ## 🔬 2. Verification & Safety Metrics
 
-- **Super Strict Unit Test Suite:** **61/61 tests passed (100%)** under Clang/GCC with AddressSanitizer and UndefinedBehaviorSanitizer.
+- **Super Strict Unit Test Suite:** **62/62 tests passed (100%)** at `76142e7`, plus **65/65** holdout assertions (`make holdout`). ASan/UBSan coverage is exercised by `scripts/verify_phase.sh`.
 - **Hidden Holdout Test Suite:** **65/65 Assertions passed (100%)** across holdout scenarios.
 - **Multi-Arena Benchmarks:** **36/36 Arenas passed (100%)** including organism self-model and cognitive adaptation arenas.
-- **Memory Safety:** 100% verified allocation guards, 0 leaks, 0 undefined behavior, stable at ~12.5 MB RSS.
+- **Memory Safety:** 100% verified allocation guards, 0 leaks, 0 undefined behavior. RSS is **session-dependent** and must be quoted with its metric: at 2026-10-15 the live daemon measured VmRSS 7.4–19.1 MiB (it varied 19.1 → 7.4 MiB within 20 minutes), PSS ≈ 2.3–9.9 MiB, cgroup ≈ 16 MiB. A bare `~12.5 MB` is not reproducible without stating VmRSS vs PSS vs cgroup and the workload.
 - **Compiler Cleanliness:** Zero warnings under `-Wall -Wextra -Werror -Wpedantic -O2`.
 
 ---

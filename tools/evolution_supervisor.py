@@ -1033,6 +1033,31 @@ def collect_status_block():
         f"• ACTIVE sha `{(meta.get('ACTIVE_SHA') or '?')[:12]}` | LKG sha `{(meta.get('LKG_SHA') or '?')[:12]}` | DEPLOY_SEQ {meta.get('DEPLOY_SEQ', '?')}",
         f"• Selfest: ACTIVE={meta.get('SELFEST_ACTIVE', '?')} LKG={meta.get('SELFEST_LKG', '?')}",
     ]
+    # H11: verify the declared provenance instead of echoing it as fact.
+    declared = (meta.get("ACTIVE_SHA") or "").strip()
+    disk_sha = ""
+    try:
+        disk_sha = hashlib.sha256((WORKSPACE_DIR / "almaz").read_bytes()).hexdigest()
+    except Exception:
+        pass
+    run_sha = ""
+    try:
+        _pid = subprocess.run(["systemctl", "show", "almaz", "-p", "MainPID", "--value"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
+        _kids = subprocess.run(["pgrep", "-P", _pid or "0"], capture_output=True, text=True,
+                               timeout=10).stdout.split()
+        _target = _kids[0] if _kids else _pid
+        if _target:
+            run_sha = hashlib.sha256(open(f"/proc/{_target}/exe", "rb").read()).hexdigest()
+    except Exception:
+        pass
+    if declared and disk_sha and run_sha:
+        if declared == disk_sha == run_sha:
+            lines.append(f"• ✅ Provenance verified: meta == active slot == running image (`{declared[:12]}`)")
+        else:
+            lines.append(f"• 🔴 PROVENANCE MISMATCH: meta `{declared[:12]}` | slot `{disk_sha[:12]}` | running `{run_sha[:12]}`")
+    else:
+        lines.append("• ⚠️ Provenance NOT fully verified (missing meta/slot/runtime hash)")
     try:
         r = subprocess.run(["systemctl", "show", "almaz-guardian.timer", "-p", "LastTriggerUSec", "--value"],
                            capture_output=True, text=True, timeout=10)

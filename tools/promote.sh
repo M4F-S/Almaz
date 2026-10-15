@@ -41,6 +41,12 @@ case "$LKG" in *[!A-Za-z0-9._-]*|"") fail "LKG slot name invalid: $LKG";; esac
 [ -x "./$ACTIVE" ] || fail "active slot missing: $ACTIVE"
 [ -x "./$LKG" ] || fail "LKG slot missing: $LKG"
 
+# H12: slots must be distinct by CONTENT, not just by name. A rollback target that is
+# byte-identical to STAGING (or to ACTIVE) cannot roll anything back.
+_hash() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+[ "$(_hash "./$ACTIVE")" != "$(_hash "./$LKG")" ] || fail "ACTIVE and LKG are byte-identical ($ACTIVE == $LKG by hash) — rollback would be a no-op"
+[ "$(_hash "./$LKG")" != "$(_hash "./$STAGING")" ] || fail "LKG and STAGING are byte-identical ($LKG == $STAGING by hash) — seed a distinct LKG (e.g. almaz.lkg)"
+
 echo "[promote] Gate 1: candidate --selfest"
 if ! "$CAND" --selfest > /tmp/promote_selfest.log 2>&1; then
   fail "candidate --selfest failed: $(tail -1 /tmp/promote_selfest.log)"
