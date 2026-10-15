@@ -16,6 +16,22 @@
 #include <unistd.h>
 #include <math.h>
 
+/* H15b: derive the provider label from the LIVE endpoint. The previous ternary recognised
+   only openrouter.ai and called every other endpoint "Local Metal Ollama", so the system
+   prompt of every single turn told the agent it was running on local Ollama while it was
+   actually on a cloud provider - which is why it asserted that to the operator. */
+static const char *provider_label(const char *endpoint) {
+    if (!endpoint || !*endpoint) return "unconfigured";
+    if (strstr(endpoint, "openrouter.ai"))  return "OpenRouter Cloud";
+    if (strstr(endpoint, "opencode.ai"))    return "OpenCode Zen";
+    if (strstr(endpoint, "api.openai.com")) return "OpenAI Cloud";
+    if (strstr(endpoint, "anthropic.com"))  return "Anthropic Cloud";
+    if (strstr(endpoint, "generativelanguage")) return "Google AI";
+    if (strstr(endpoint, "localhost") || strstr(endpoint, "127.0.0.1") ||
+        strstr(endpoint, "11434"))          return "Local Inference";
+    return "Remote API";
+}
+
 double almaz_fademem_retention(time_t now, time_t last_acc, int access_count, double salience, double lambda) {
     if (salience <= 0.0) return 0.0;
     if (lambda < 0.0) lambda = 0.05;
@@ -2813,7 +2829,7 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
                 dyn_str_append(&dynamic_part, SYSTEM_PROMPT_DYNAMIC_BOUNDARY);
             }
             if (agent->gateway && agent->gateway->model) {
-                const char *provider = (agent->gateway->endpoint && strstr(agent->gateway->endpoint, "openrouter.ai") != NULL) ? "OpenRouter Cloud" : "Local Metal Ollama";
+                const char *provider = provider_label(agent->gateway->endpoint);
                 dyn_str_appendf(&dynamic_part, "Active Model: %s (Provider: %s).\nWhen asked what model, LLM, or backend you are currently running, identify yourself as Almaz powered by '%s' via %s.\n",
                                 agent->gateway->model, provider, agent->gateway->model, provider);
             }
@@ -3089,7 +3105,7 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
             DynString sys_content = dyn_str_new();
             dyn_str_append(&sys_content, agent->messages[0].content);
             if (agent->gateway && agent->gateway->model) {
-                const char *provider = (agent->gateway->endpoint && strstr(agent->gateway->endpoint, "openrouter.ai") != NULL) ? "OpenRouter Cloud" : "Local Metal Ollama";
+                const char *provider = provider_label(agent->gateway->endpoint);
                 dyn_str_appendf(&sys_content, "\n\n=== Active Runtime Engine ===\nActive Model: %s (Provider: %s).\nWhen asked what model, LLM, or backend you are currently running, identify yourself as Belya powered by '%s' via %s.\n",
                                 agent->gateway->model, provider, agent->gateway->model, provider);
             }
