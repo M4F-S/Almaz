@@ -65,3 +65,5 @@ almaz.new
 # workspace as dirty (it counts untracked files).
 HARDENING_PLAN_*.md
 recovery/
+# H16b: transient backup written by the rules fixture
+.agentrules.testbak
