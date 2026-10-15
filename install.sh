@@ -73,8 +73,8 @@ else
     git clone --depth 1 https://github.com/${REPO}.git "$TMP_DIR/src"
     cd "$TMP_DIR/src"
     make -j4
-    chmod +x belya
-    cp belya "$DEST"
+    chmod +x build/almaz
+    cp build/almaz "$DEST"
     echo "[+] Built and installed natively from source."
 fi
 

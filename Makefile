@@ -11,7 +11,11 @@ LIBS = $(DEAD_STRIP) -lcurl -lsqlite3 -lm
 
 SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c main.c
 OBJS = $(SRCS:.c=.o)
-TARGET = almaz
+BUILD_DIR = build
+TARGET = $(BUILD_DIR)/almaz
+DEPLOY_BIN = almaz
+DEPLOY_SVC = almaz
+DEPLOY_RESTART = systemctl restart $(DEPLOY_SVC)
 
 TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c test_suite.c
 TEST_TARGET = almaz_test
@@ -26,7 +30,10 @@ WATCHDOG_TARGET = almaz-watchdog
 
 all: $(TARGET) $(WATCHDOG_TARGET)
 
-$(TARGET): $(OBJS)
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+$(TARGET): $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LIBS)
 
 $(WATCHDOG_TARGET): watchdog.c
@@ -57,10 +64,36 @@ arena: benchmark
 $(BENCHMARK_TARGET): $(BENCHMARK_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(BENCHMARK_SRCS) $(LIBS)
 
+# deploy: publish the built artifact to the path the service actually runs, respecting the
+# immutable flag, and restart ONLY when the content really changed (H3/H4).
+deploy: $(TARGET)
+	@set -e; \
+	if [ -e "$(DEPLOY_BIN)" ] && cmp -s "$(TARGET)" "$(DEPLOY_BIN)"; then \
+	  echo "[deploy] $(DEPLOY_BIN) already matches $(TARGET) - no restart needed"; \
+	else \
+	  echo "[deploy] installing $(TARGET) -> $(DEPLOY_BIN)"; \
+	  if [ -e "$(DEPLOY_BIN)" ]; then cp -a "$(DEPLOY_BIN)" "$(DEPLOY_BIN).lkg"; fi; \
+	  chattr -i "$(DEPLOY_BIN)" 2>/dev/null || true; \
+	  install -m 0755 "$(TARGET)" "$(DEPLOY_BIN).new"; \
+	  mv -f "$(DEPLOY_BIN).new" "$(DEPLOY_BIN)"; \
+	  chattr +i "$(DEPLOY_BIN)" 2>/dev/null || true; \
+	  $(DEPLOY_RESTART); \
+	fi
+
+# release: the whole ritual in one command - clean build, test gate, then deploy (H4).
+release:
+	$(MAKE) clean
+	$(MAKE) $(TARGET)
+	$(MAKE) test
+	$(MAKE) deploy
+
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) $(WATCHDOG_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
+	# NOTE: almaz-watchdog is a DEPLOYED artifact (chattr +i, and its absence is a
+	# 203/EXEC loop) - clean must never delete it. Use `make deploy` to publish it.
+	-rm -rf $(BUILD_DIR)
+	-rm -f $(OBJS) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
 
 gdrive:
 	@./scripts/sync_to_gdrive.sh
 
-.PHONY: all test holdout test-holdout benchmark arena clean gdrive
+.PHONY: all test holdout test-holdout benchmark arena clean gdrive deploy release

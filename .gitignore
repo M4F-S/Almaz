@@ -55,3 +55,8 @@ almaz.lkg
 almaz.old-*
 almaz_test_asan
 .deploy_meta
+
+# Build output (H3: the build no longer writes the deployed artifact)
+build/
+almaz.new
+*.lkg
