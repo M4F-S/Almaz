@@ -33,6 +33,18 @@ fail() {
   exit 1
 }
 
+# H6: the slots are chattr +i in production, so every write into a slot must clear the
+# flag first. One unlock per slot per run; the trap restores every flag we cleared - on
+# success, failure and signal alike - so a failed promote cannot leave a slot unlocked.
+RELOCK_SLOTS=""
+unlock_slot() { # $1 = slot path
+  [ -e "$1" ] || return 0
+  case " ${RELOCK_SLOTS} " in *" $1 "*) return 0 ;; esac
+  if chattr -i "$1" 2>/dev/null; then RELOCK_SLOTS="$RELOCK_SLOTS $1"; fi
+}
+relock_slots() { for s in $RELOCK_SLOTS; do [ -e "$s" ] && chattr +i "$s" 2>/dev/null || true; done; }
+trap relock_slots EXIT INT TERM
+
 [ -x "$CAND" ] || fail "candidate not executable: $CAND"
 [ -n "$ACTIVE" ] && [ -n "$LKG" ] && [ -n "$STAGING" ] || fail "deploy_state incomplete (ACTIVE=$ACTIVE LKG=$LKG STAGING=$STAGING)"
 case "$ACTIVE" in *[!A-Za-z0-9._-]*|"") fail "ACTIVE slot name invalid: $ACTIVE";; esac
@@ -56,6 +68,7 @@ echo "[promote] Gate 1 passed."
 echo "[promote] Gate 2: protocol sanity (candidate announces same watchdog contract)"
 "$CAND" --help 2>&1 | grep -q -- "--telegram" || fail "candidate --help lacks --telegram contract"
 
+unlock_slot "./$STAGING"
 if [ "$CAND" -ef "./$STAGING" ]; then
   echo "[promote] Candidate is already the STAGING slot; skipping copy."
 else
@@ -64,6 +77,7 @@ fi
 chmod 755 "./$STAGING"
 
 echo "[promote] Promoting $STAGING -> $ACTIVE (atomic rename)"
+unlock_slot "./$ACTIVE"
 cp -a "./$ACTIVE" ".$ACTIVE.rollback"
 cp -a "./$STAGING" "./.almaz.new"
 mv -f "./.almaz.new" "./$ACTIVE"
@@ -97,6 +111,7 @@ grep -q "Crash-loop detected" <(journalctl -u almaz --no-pager --since "2 minute
 
 # Rotate LKG: the pre-promote ACTIVE is the newest known-good (Kimi K3 P1:
 # stale LKG ossifies the rollback target).
+unlock_slot "./$LKG"
 cp -a ".$ACTIVE.rollback" "./$LKG"
 echo "[promote] LKG rotated: previous ACTIVE -> $LKG"
 
