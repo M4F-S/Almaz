@@ -6335,6 +6335,28 @@ void almaz_goals_generate_deterministic(BelyaHarness *h) {
     }
 }
 
+/* H7: reduce a wrapped, auto-generated goal name to the bare form the handlers match.
+   health_watcher enqueues "Investigate and remediate health event: X (incident N)" and
+   timeline_anomaly enqueues "Investigate timeline anomaly: ...", while the dispatcher
+   below compares against bare names - so every auto-generated remediation goal was
+   unreachable and stayed pending forever, re-alerting on every cycle. */
+static void canonical_goal_name(const char *raw, char *out, size_t n) {
+    static const char *pfx_health = "Investigate and remediate health event: ";
+    static const char *pfx_anom   = "Investigate timeline anomaly: ";
+    const char *p = raw ? raw : "";
+    if (strncmp(p, pfx_health, strlen(pfx_health)) == 0) {
+        snprintf(out, n, "%s", p + strlen(pfx_health));
+        char *suffix = strstr(out, " (incident ");
+        if (suffix) *suffix = '\0';
+        return;
+    }
+    if (strncmp(p, pfx_anom, strlen(pfx_anom)) == 0) {
+        snprintf(out, n, "timeline_anomaly");
+        return;
+    }
+    snprintf(out, n, "%s", p);
+}
+
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     if (!h || !h->agent || !h->agent->db) return false;
     sqlite3 *db = h->agent->db;
@@ -6352,7 +6374,8 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
         goal_id = sqlite3_column_int(stmt, 0);
         const char *g = (const char *)sqlite3_column_text(stmt, 1);
         const char *c = (const char *)sqlite3_column_text(stmt, 2);
-        if (g) snprintf(goal_name, sizeof(goal_name), "%s", g);
+        /* H7: canonicalise before the strcmp cascade (see canonical_goal_name). */
+        if (g) canonical_goal_name(g, goal_name, sizeof(goal_name));
         if (c) snprintf(category, sizeof(category), "%s", c);
     }
     sqlite3_finalize(stmt);
@@ -6406,6 +6429,15 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     } else if (strcmp(goal_name, "concept_fusion_sweep") == 0) {
         size_t fused = almaz_concept_fusion_sweep(h->agent);
         dyn_str_appendf(&res_ds, "Subconscious concept fusion completed: consolidated %zu episodes into invariant schemata.", fused);
+    } else if (strcmp(goal_name, "timeline_anomaly") == 0) {
+        /* H7: the detector already recorded the anomaly in agent_timeline when it enqueued
+           this goal, and re-running the scan would enqueue another one, so this is an
+           explicit acknowledgement with an audit entry. The summary says exactly that
+           instead of pretending a remediation ran. */
+        belya_agent_log_timeline(h->agent, "anomaly_acknowledged",
+                                 "Timeline anomaly goal acknowledged by the remediation dispatcher.");
+        dyn_str_append(&res_ds, "Timeline anomaly acknowledged (already recorded in agent_timeline). "
+                                "No automated remediation is defined for this class; nothing was changed.");
     } else if (strcmp(category, "HEALTH_REMEDIATION") == 0 || strcmp(category, "ANOMALY_REMEDIATION") == 0) {
         /* H6: deterministic remediation runbooks — no more fake "completed".
            Each known goal gets a real, bounded, non-destructive action;
@@ -6493,9 +6525,15 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
     // 1. Deterministically generate pending goals based on current telemetry
     almaz_goals_generate_deterministic(harness);
 
-    // 2. Process highest-priority pending goal
+    // 2. Drain a bounded batch of pending goals (H7/H10). The queue only drains here,
+    //    so processing a single goal per ~2h cycle left remediations pending for days.
     char *goal_summary = NULL;
-    almaz_goals_process_next(harness, &goal_summary);
+    for (int gi = 0; gi < 5; gi++) {
+        char *one = NULL;
+        if (!almaz_goals_process_next(harness, &one)) break;
+        free(goal_summary);
+        goal_summary = one;   /* keep the last summary for the log line below */
+    }
 
     // 3. Sync self-model
     almaz_agent_sync_self_model(harness->agent);
@@ -6507,6 +6545,8 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
              goal_summary ? goal_summary : "nominally complete",
              harness->agent->turn_count, belya_get_current_rss_mb());
     belya_agent_log_timeline(harness->agent, "autonomic_cycle", log_buf);
+    free(goal_summary);   /* the dispatcher hands ownership of the summary to the caller */
+    goal_summary = NULL;
 
     // 5. Evaluate if a critical alert is warranted (silent by default)
     if (out_critical_alert) {
