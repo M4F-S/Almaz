@@ -58,19 +58,46 @@ static long health_watcher_rss_kb(void) {
     return health_watcher_parse_rss_kb(buf);
 }
 
-static bool sqlite_quick_check_ok(sqlite3 *db) {
+/* H8: quick_check on a LIVE database with an active writer can fail transiently, and a
+   busy/locked read is not corruption at all. Report three states so the caller can never
+   mistake "could not check" for "corrupt": 1 = ok, 0 = the check definitively said not-ok,
+   -1 = unknown (prepare/step error, busy, locked). */
+static int sqlite_quick_check_state(sqlite3 *db) {
+    if (!db) return -1;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "PRAGMA quick_check;", -1, &stmt, NULL) != SQLITE_OK) return -1;
+    int rc = sqlite3_step(stmt);
+    int state = -1;
+    if (rc == SQLITE_ROW) {
+        const unsigned char *txt = sqlite3_column_text(stmt, 0);
+        state = (txt && strcmp((const char *)txt, "ok") == 0) ? 1 : 0;
+    } else if (rc == SQLITE_DONE) {
+        state = 1;                    /* no rows: nothing reported, treat as ok */
+    }
+    sqlite3_finalize(stmt);
+    return state;
+}
+
+/* H8: the authoritative full check. Expensive, so it is only run on the failure path -
+   a corruption alert must never rest on the fast subset alone. */
+static bool sqlite_integrity_check_ok(sqlite3 *db) {
     if (!db) return false;
     sqlite3_stmt *stmt = NULL;
     bool ok = false;
-    if (sqlite3_prepare_v2(db, "PRAGMA quick_check;", -1, &stmt, NULL) == SQLITE_OK) {
-        if (sqlite3_step(stmt) == SQLITE_ROW) {
+    if (sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &stmt, NULL) == SQLITE_OK) {
+        int rows = 0;
+        bool all_ok = true;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
             const unsigned char *txt = sqlite3_column_text(stmt, 0);
-            ok = (txt && strcmp((const char *)txt, "ok") == 0);
+            rows++;
+            if (!txt || strcmp((const char *)txt, "ok") != 0) all_ok = false;
         }
+        ok = (rows > 0 && all_ok);
     }
     sqlite3_finalize(stmt);
     return ok;
 }
+
 
 static bool prune_timeline(sqlite3 *db, int keep) {
     if (!db) return false;
@@ -195,12 +222,19 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
     if (agent->db && (hw->last_sqlite_check_time == 0 ||
                       (now - hw->last_sqlite_check_time) >= HW_SQLITE_INTERVAL)) {
         hw->last_sqlite_check_time = now;
-        if (!sqlite_quick_check_ok(agent->db)) {
-            /* Retry briefly (transient WAL states can trip quick_check). */
-            bool persistent = true;
-            for (int i = 0; i < 2; i++) {
+        int qc = sqlite_quick_check_state(agent->db);
+        if (qc != 1) {
+            /* H8: retry, treating "unknown" as NOT corruption, then require the full
+               integrity_check before this is allowed to become an operator alert. */
+            bool persistent = (qc == 0);
+            for (int i = 0; i < 3 && persistent; i++) {
                 sleep(HW_RETRY_GAP);
-                if (sqlite_quick_check_ok(agent->db)) { persistent = false; break; }
+                qc = sqlite_quick_check_state(agent->db);
+                if (qc == 1) { persistent = false; break; }
+                if (qc == -1) { persistent = false; break; }
+            }
+            if (persistent && sqlite_integrity_check_ok(agent->db)) {
+                persistent = false;   /* the full check disagrees -> not corruption */
             }
             if (persistent && !hw->sqlite_alerted) {
                 /* single retained recovery copy — a VACUUM INTO backup can be
