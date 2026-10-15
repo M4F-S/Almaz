@@ -434,6 +434,28 @@ static bool telegram_permission_prompt_callback(BelyaHarness *h, const char *nam
     return decision;
 }
 
+/* H9: the documented "idle >= 30m, max 3 cycles/day, >= 2h apart" gate lived only in
+   memory, so every daemon restart handed the loop a fresh allowance - 11 cycles were
+   measured in a 24h window against a 3/day limit. Derive the counters from agent_timeline
+   (which the cycle already writes to) once per process, so the cap survives restarts. */
+static void autonomic_state_load_from_timeline(TelegramBot *bot, BelyaHarness *harness) {
+    if (!bot || !harness || !harness->agent || !harness->agent->db) return;
+    sqlite3_stmt *st = NULL;
+    const char *q =
+        "SELECT (SELECT COUNT(*) FROM agent_timeline "
+        "        WHERE event_type='autonomic_cycle' AND created_at >= date('now')), "
+        "       COALESCE((SELECT strftime('%s', MAX(created_at)) FROM agent_timeline "
+        "        WHERE event_type='autonomic_cycle'), 0);";
+    if (sqlite3_prepare_v2(harness->agent->db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            bot->autonomic_cycles_today = sqlite3_column_int(st, 0);
+            long long last = sqlite3_column_int64(st, 1);
+            if (last > 0) bot->last_autonomic_time = (time_t)last;
+        }
+    }
+    sqlite3_finalize(st);
+}
+
 void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
     if (!bot || !harness) return;
 
@@ -490,6 +512,11 @@ void telegram_bot_run(TelegramBot *bot, BelyaHarness *harness) {
                 if (bot->last_autonomic_day != tm_now.tm_yday) {
                     bot->autonomic_cycles_today = 0;
                     bot->last_autonomic_day = tm_now.tm_yday;
+                }
+
+                if (!bot->autonomic_state_loaded) {   /* H9: survive restarts */
+                    autonomic_state_load_from_timeline(bot, harness);
+                    bot->autonomic_state_loaded = 1;
                 }
 
                 double idle_sec = difftime(now, bot->last_activity_time);

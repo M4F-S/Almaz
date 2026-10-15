@@ -10,6 +10,7 @@ typedef struct {
     bool running;
     time_t last_activity_time;
     int autonomic_cycles_today;
+    int autonomic_state_loaded;   /* H9: set once the counters are restored from agent_timeline */
     time_t last_autonomic_time;
     int last_autonomic_day;
     int consecutive_poll_failures; // health watcher counter
