@@ -60,3 +60,8 @@ almaz_test_asan
 build/
 almaz.new
 *.lkg
+
+# N1: the agent's own plan/recovery outputs made verify_workspace_integrity report the
+# workspace as dirty (it counts untracked files).
+HARDENING_PLAN_*.md
+recovery/
