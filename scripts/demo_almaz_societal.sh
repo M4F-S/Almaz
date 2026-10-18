@@ -42,7 +42,7 @@ MISSION="${1:-Consolidate UAE executive governance directives into FadeMem; run 
 echo -e "${CYAN}[*] Launching Almaz Cognitive Stage HUD with Real-Time Affect Telemetry...${RESET}"
 echo -e "Mission: \"${MISSION}\"\n"
 
-./build/almaz --stage -P falcon3 "${MISSION}" || {
+./build/almaz --stage -P falcon3 -p "${MISSION}" || {
     echo -e "\n${YELLOW}[!] Live model probe returned exit code; running deterministic self-contained verification suite...${RESET}"
     ./almaz_test
 }
