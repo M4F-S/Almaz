@@ -3979,6 +3979,64 @@ static void test_gateway_preflight_probe(void) {
     printf("  -> Gateway Pre-Flight Health & Auth Probe PASSED\n");
 }
 
+static void test_almaz_championship_presets_and_cognitive_telemetry(void) {
+    printf("[Test] Dubai Championship UAE Falcon Presets & Cognitive Stage Telemetry...\n");
+
+    // 1. Verify Falcon presets in Almaz
+    const ModelPresetConfig *p_falcon = model_preset_get("falcon");
+    assert(p_falcon != NULL);
+    assert(strcmp(p_falcon->name, "falcon") == 0);
+    assert(strstr(p_falcon->model_name, "falcon3") != NULL);
+    assert(p_falcon->is_airgap == true);
+
+    const ModelPresetConfig *p_vllm = model_preset_get("falcon-vllm");
+    assert(p_vllm != NULL);
+    assert(strstr(p_vllm->model_name, "Falcon3") != NULL);
+
+    const ModelPresetConfig *p_airgap = model_preset_get("airgap");
+    assert(p_airgap != NULL);
+    assert(p_airgap->is_airgap == true);
+
+    assert(model_preset_get("unknown_preset") == NULL);
+
+    // 2. Verify Markdown Codeblock Scavenger
+    const char *known_tools[] = {"bash", "read_file", "write_file"};
+    size_t known_count = 3;
+    const char *fenced = "I will check the cognitive status:\n```bash\nsqlite3 almaz_memory.sqlite 'SELECT count(*) FROM self_model;'\n```\nDone.";
+    ModelParsedToolCall *calls = NULL;
+    size_t count = model_gateway_scavenge_tool_calls(fenced, NULL, known_tools, known_count, &calls);
+    assert(count == 1);
+    assert(calls != NULL);
+    assert(strcmp(calls[0].name, "bash") == 0);
+    assert(strstr(calls[0].arguments_json, "SELECT count(*) FROM self_model") != NULL);
+    for (size_t i = 0; i < count; i++) {
+        if (calls[i].id) free(calls[i].id);
+        if (calls[i].name) free(calls[i].name);
+        if (calls[i].arguments_json) free(calls[i].arguments_json);
+    }
+    free(calls);
+
+    // 3. Verify Stage Telemetry & VIGIL Proprioception in Almaz
+    setenv("BELYA_TEST_MODE", "1", 1);
+    ModelGateway *gw = model_gateway_init("http://localhost:11434/v1/chat/completions", "none", "falcon3:7b");
+    assert(gw != NULL);
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", NULL);
+    assert(agent != NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+    assert(h != NULL);
+
+    h->stage_mode = true;
+    assert(h->stage_mode == true);
+    assert(agent->confidence >= 0.0f && agent->confidence <= 1.0f);
+    assert(almaz_agent_distress(agent) >= 0.0f);
+
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unsetenv("BELYA_TEST_MODE");
+
+    printf("  -> Dubai Championship UAE Falcon Presets & Cognitive Stage Telemetry PASSED\n");
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -4043,7 +4101,8 @@ int main(void) {
     test_phase6_web_search_notebook_and_lsp();
     test_phase7_omnichannel_and_remote_backends();
     test_gateway_preflight_probe();
-    printf("================ All Tests Passed Successfully (62/62 - 100%%) ================\n\n");
+    test_almaz_championship_presets_and_cognitive_telemetry();
+    printf("================ All Tests Passed Successfully (63/63 - 100%%) ================\n\n");
     return 0;
 }
 

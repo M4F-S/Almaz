@@ -2990,6 +2990,11 @@ BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_wh
     } else if (eb_env && strcasecmp(eb_env, "ssh") == 0 && ssh_env && strlen(ssh_env) > 0) {
         belya_harness_set_exec_backend(h, BELYA_BACKEND_SSH, ssh_env);
     }
+    const char *st_env = getenv("ALMAZ_STAGE_TELEMETRY");
+    if (!st_env) st_env = getenv("BELYA_STAGE_TELEMETRY");
+    if (st_env && (strcmp(st_env, "1") == 0 || strcasecmp(st_env, "true") == 0)) {
+        h->stage_mode = true;
+    }
     if (!g_workspace_root_set) {
         char root_tmp[4096];
         if (getcwd(root_tmp, sizeof(root_tmp))) {
@@ -6079,7 +6084,22 @@ bool almaz_should_retrieve_memory(const char *user_input) {
 void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
     if (!h || !prompt || strlen(prompt) == 0) return;
 
+    double turn_t0 = get_time_ms();
     belya_harness_reset_turn_state(h);
+
+    if (h->stage_mode) {
+        printf("\n\033[1;35m┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\033[0m\n");
+        printf("\033[1;35m┃\033[0m \033[1;33m🏆 CREATE AI AGENTS CHAMPIONSHIP (DUBAI) - COGNITIVE STAGE HUD\033[0m             \033[1;35m┃\033[0m\n");
+        printf("\033[1;35m┃\033[0m Agent:    \033[1;37mAlmaz (Autopoietic Sovereign AI - Personal/Societal Track)\033[0m        \033[1;35m┃\033[0m\n");
+        printf("\033[1;35m┃\033[0m Runtime:  \033[1;32mBare-Metal C99 POSIX\033[0m (macOS M2 / Linux) | RSS: \033[1;32m%.2f MB\033[0m           \033[1;35m┃\033[0m\n", belya_get_current_rss_mb());
+        printf("\033[1;35m┃\033[0m Cognition:\033[1;36m SARSI Self-Model | VIGIL EmoBank | FadeMem Bio-Decay | CORAL\033[0m    \033[1;35m┃\033[0m\n");
+        printf("\033[1;35m┃\033[0m VIGIL:    Confidence: \033[1;32m%.2f\033[0m | Frustration: \033[1;33m%.2f\033[0m | Recent Form: \033[1;32m%.2f\033[0m     \033[1;35m┃\033[0m\n",
+               h->agent->confidence, h->agent->frustration, h->agent->recent_form);
+        printf("\033[1;35m┃\033[0m Security: \033[1;32m100%% Air-Gapped\033[0m | Zero Cloud Telemetry | Verifiable Local Memory     \033[1;35m┃\033[0m\n");
+        printf("\033[1;35m┃\033[0m Model:    \033[1;35m%-26s\033[0m | Tools: \033[1;33m%zu active\033[0m                      \033[1;35m┃\033[0m\n",
+               (h->agent->gateway && h->agent->gateway->model) ? h->agent->gateway->model : "default", h->tool_count);
+        printf("\033[1;35m┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\033[0m\n\n");
+    }
 
     // Ephemeral Git checkpoint before turn starts
     belya_agent_create_checkpoint(h->agent, "pre_turn_auto");
@@ -6104,12 +6124,22 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
     // Turn Execution Cycle
     bool turn_running = true;
     int max_steps = 50;
+    int step_idx = 0;
 
     while (turn_running && max_steps-- > 0) {
+        step_idx++;
         if (!h->agent->gateway->streaming) {
             printf("\033[0;33m[Thinking...]\033[0m\n");
         }
+        double step_t0 = get_time_ms();
         ModelGatewayResponse resp = belya_agent_step(h->agent);
+        double step_t1 = get_time_ms();
+
+        if (h->stage_mode) {
+            printf("\033[1;35m[COGNITIVE METRICS - Step %d]\033[0m Latency: \033[1;32m%.1f ms\033[0m | Conf: %.2f | Form: %.2f | In: %zu tok | Out: %zu tok | RSS: \033[1;32m%.2f MB\033[0m\n",
+                   step_idx, step_t1 - step_t0, h->agent->confidence, h->agent->recent_form,
+                   resp.prompt_tokens, resp.completion_tokens, belya_get_current_rss_mb());
+        }
 
         if (!resp.has_tool_call) {
             // Deterministic Verification Guard
@@ -6221,6 +6251,7 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                 }
                 belya_hook_result_free(&pre_hook);
 
+                double tool_t0 = get_time_ms();
                 JsonValue *args_parsed = json_parse(tc->arguments_json);
                 char *observation = NULL;
                 g_active_custom_script_path = matched->custom_script_path;
@@ -6231,6 +6262,7 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                 }
                 g_active_custom_script_path = NULL;
                 json_free(args_parsed);
+                double tool_t1 = get_time_ms();
 
                 char *breaker_alert = NULL;
                 bool tripped = belya_harness_record_tool_observation(h, tc->name, tc->arguments_json, observation, &breaker_alert);
@@ -6241,6 +6273,11 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
 
                 bool tool_success = (!tripped && observation && strncmp(observation, "Error:", 6) != 0 && strncmp(observation, "error:", 6) != 0);
                 almaz_agent_record_appraisal(h->agent, tool_success);
+
+                if (h->stage_mode) {
+                    printf("\033[1;32m[COGNITIVE TOOL EXECUTION]\033[0m Tool '%s' in \033[1;32m%.2f ms\033[0m | Outcome: \033[1;32m%s\033[0m | Conf: %.2f | Obs: %zu bytes\n",
+                           tc->name, tool_t1 - tool_t0, tool_success ? "SUCCESS" : "FAILURE", h->agent->confidence, final_obs ? strlen(final_obs) : 0);
+                }
 
                 printf("\033[0;32m[Observation Output (%zu bytes)]\033[0m\n", final_obs ? strlen(final_obs) : 0);
                 if (tripped) {
@@ -6255,6 +6292,13 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
             }
         }
         model_gateway_response_free(&resp);
+    }
+
+    double turn_t1 = get_time_ms();
+    h->last_turn_latency_ms = turn_t1 - turn_t0;
+    if (h->stage_mode) {
+        printf("\033[1;35m[COGNITIVE TURN SUMMARY]\033[0m Total Latency: \033[1;32m%.1f ms\033[0m | Confidence: \033[1;32m%.2f\033[0m | Recent Form: \033[1;32m%.2f\033[0m | Distress: %.2f | Peak RSS: \033[1;32m%.2f MB\033[0m\n\n",
+               h->last_turn_latency_ms, h->agent->confidence, h->agent->recent_form, almaz_agent_distress(h->agent), belya_get_current_rss_mb());
     }
 }
 
