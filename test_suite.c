@@ -1526,6 +1526,104 @@ static void test_workspace_path_jailing(void) {
     printf("  -> Workspace Path Jailing PASSED\n");
 }
 
+static BelyaToolCallback e01_find_tool(BelyaHarness *h, const char *name) {
+    for (size_t i = 0; i < h->tool_count; i++) {
+        if (strcmp(h->tools[i].name, name) == 0) return h->tools[i].callback;
+    }
+    return NULL;
+}
+
+static JsonValue *e01_args_for(const char *tool, const char *path) {
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "path", json_create_string(path));
+    if (strcmp(tool, "write_file") == 0) {
+        json_obj_add(args, "content", json_create_string("pwned\n"));
+    } else if (strcmp(tool, "edit_file") == 0) {
+        json_obj_add(args, "old_text", json_create_string("root:"));
+        json_obj_add(args, "new_text", json_create_string("pwned:"));
+    } else if (strcmp(tool, "search_files") == 0) {
+        json_obj_add(args, "pattern", json_create_string("root:"));
+    } else if (strcmp(tool, "apply_patch") == 0) {
+        json_obj_add(args, "patch",
+            json_create_string("<<<<<<< SEARCH\nroot:x:0:0:root:/root:/bin/bash\n=======\npwned:x:0:0:root:/root:/bin/bash\n>>>>>>> REPLACE\n"));
+    }
+    return args;
+}
+
+/* S1.1 / E-01: list_dir must pass through the workspace jail like Belya does. */
+static void test_e01_list_dir_jail(void) {
+    printf("[Test] S1.1/E-01: list_dir workspace jail enforcement...\n");
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_e01_mem.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    BelyaToolCallback cb_list = e01_find_tool(h, "list_dir");
+    assert(cb_list != NULL);
+
+    JsonValue *args = json_create_object();
+    json_obj_add(args, "path", json_create_string("/etc"));
+    char *out = cb_list(agent, args);
+    printf("    list_dir(\"/etc\") -> %.100s\n", out ? out : "(null)");
+    assert(out != NULL);
+    assert(strstr(out, "Path traversal denied") != NULL);
+
+    free(out);
+    json_free(args);
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_e01_mem.sqlite");
+    printf("  -> list_dir Workspace Jail PASSED\n");
+}
+
+/* S1.1 / E-01: every file-touching tool x 3 escape vectors must be denied. */
+static void test_e01_escape_matrix(void) {
+    printf("[Test] S1.1/E-01: file-tool escape matrix (6 tools x 3 vectors)...\n");
+
+    static const char *tools[] = {
+        "read_file", "write_file", "edit_file", "list_dir", "search_files", "apply_patch"
+    };
+    const char *link_path = "e01_escape_symlink";
+    unlink(link_path);
+    assert(symlink("/etc", link_path) == 0);
+
+    const char *vectors[3] = { "/etc/passwd", "../..", link_path };
+
+    ModelGateway *gw = model_gateway_init("http://mock", "mock-key", "mock-model");
+    BelyaAgent *agent = belya_agent_init(gw, "test_e01_mem.sqlite", NULL);
+    BelyaHarness *h = belya_harness_init(agent);
+
+    int leaks = 0;
+    printf("    %-12s | %-14s | %-7s | output\n", "tool", "vector", "verdict");
+    for (size_t t = 0; t < sizeof(tools) / sizeof(tools[0]); t++) {
+        BelyaToolCallback cb = e01_find_tool(h, tools[t]);
+        assert(cb != NULL);
+        for (size_t v = 0; v < 3; v++) {
+            JsonValue *args = e01_args_for(tools[t], vectors[v]);
+            char *out = cb(agent, args);
+            bool denied = (out != NULL) && (strstr(out, "Path traversal denied") != NULL);
+            char printable[80];
+            size_t k = 0;
+            for (const char *p = out ? out : "(null)"; *p && k < sizeof(printable) - 1 && k < 70; p++, k++) {
+                printable[k] = (*p == '\n') ? ' ' : *p;
+            }
+            printable[k] = '\0';
+            printf("    %-12s | %-14s | %-7s | %s\n", tools[t], vectors[v],
+                   denied ? "DENIED" : "LEAKED", printable);
+            if (!denied) leaks++;
+            free(out);
+            json_free(args);
+        }
+    }
+    assert(leaks == 0);
+
+    unlink(link_path);
+    belya_harness_free(h);
+    model_gateway_free(gw);
+    unlink("test_e01_mem.sqlite");
+    printf("  -> Escape Matrix PASSED (18/18 denied)\n");
+}
+
 static void test_markdown_frontmatter_parser(void) {
     printf("[Test] Track A.2: C99 Markdown Frontmatter Parser (minifrontmatter)...\n");
 
@@ -4009,6 +4107,8 @@ int main(void) {
     test_self_telemetry_and_proprioception();
     test_metacognitive_circuit_breaker_and_verification_guard();
     test_workspace_path_jailing();
+    test_e01_list_dir_jail();
+    test_e01_escape_matrix();
     test_markdown_frontmatter_parser();
     test_file_first_skills_catalog();
     test_composable_rule_packs();

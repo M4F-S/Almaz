@@ -634,11 +634,20 @@ bool is_path_safe(const char *path) {
     return is_path_jailed(path, NULL, false);
 }
 
+/* Single source of truth for file-tool workspace jailing (E-01).
+ * Returns NULL when the path is allowed, otherwise a heap-owned denial message.
+ * Every file-touching tool must call this instead of inlining is_path_jailed(). */
+static char *jail_or_error(const char *path, bool is_write) {
+    if (is_path_jailed(path, NULL, is_write)) return NULL;
+    return xstrdup("Error: Path traversal denied.");
+}
+
 static char *tool_read_file(BelyaAgent *agent, const JsonValue *args) {
     (void)agent;
     const char *path = json_obj_get_str(args, "path");
     if (!path) return xstrdup("Error: Missing file path argument.");
-    if (!is_path_jailed(path, NULL, false)) return xstrdup("Error: Path traversal denied.");
+    char *jail_err = jail_or_error(path, false);
+    if (jail_err) return jail_err;
 
     double offset_num = json_obj_get_num(args, "offset", 0);
     double limit_num = json_obj_get_num(args, "limit", 0);
@@ -709,7 +718,8 @@ static char *tool_write_file(BelyaAgent *agent, const JsonValue *args) {
     const char *path = json_obj_get_str(args, "path");
     const char *content = json_obj_get_str(args, "content");
     if (!path || !content) return xstrdup("Error: Missing path or content argument.");
-    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
+    char *jail_err = jail_or_error(path, true);
+    if (jail_err) return jail_err;
 
     FILE *f = fopen(path, "wb");
     if (!f) return xstrdup("Error: Failed to open path for writing.");
@@ -741,7 +751,8 @@ static char *tool_edit_file(BelyaAgent *agent, const JsonValue *args) {
     if (!path || !old_text || !new_text) {
         return xstrdup("Error: Missing required parameters (path, old_text, new_text).");
     }
-    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
+    char *jail_err = jail_or_error(path, true);
+    if (jail_err) return jail_err;
 
     FILE *f = fopen(path, "rb");
     if (!f) return xstrdup("Error: Target file not found or inaccessible.");
@@ -923,7 +934,8 @@ static char *tool_apply_patch(BelyaAgent *agent, const JsonValue *args) {
     const char *patch = json_obj_get_str(args, "patch");
 
     if (!path || !patch) return xstrdup("Error: Missing path or patch argument.");
-    if (!is_path_jailed(path, NULL, true)) return xstrdup("Error: Path traversal denied.");
+    char *jail_err = jail_or_error(path, true);
+    if (jail_err) return jail_err;
 
     FILE *f = fopen(path, "rb");
     if (!f) return xstrdup("Error: Target file not found.");
@@ -1049,6 +1061,9 @@ static char *tool_list_dir(BelyaAgent *agent, const JsonValue *args) {
     const char *path = json_obj_get_str(args, "path");
     if (!path) path = g_harness ? g_harness->cwd : ".";
 
+    char *jail_err = jail_or_error(path, false);
+    if (jail_err) return jail_err;
+
     DIR *d = opendir(path);
     if (!d) return xstrdup("Error: Unable to open directory path.");
 
@@ -1151,7 +1166,8 @@ static char *tool_search_files(BelyaAgent *agent, const JsonValue *args) {
     if (!path || strlen(path) == 0) {
         path = g_harness ? g_harness->cwd : ".";
     }
-    if (!is_path_jailed(path, NULL, false)) return xstrdup("Error: Path traversal denied.");
+    char *jail_err = jail_or_error(path, false);
+    if (jail_err) return jail_err;
 
     regex_t reg;
     regex_t *preg = NULL;
@@ -4758,7 +4774,9 @@ char *belya_harness_edit_notebook(BelyaHarness *h, const char *path, const char 
     if (!action || strlen(action) == 0) return xstrdup("Error: Missing action argument ('read', 'replace_cell', 'insert_cell', 'delete_cell').");
 
     bool is_write = strcmp(action, "read") != 0;
-    if (!is_path_jailed(path, NULL, is_write)) {
+    char *jail_err = jail_or_error(path, is_write);
+    if (jail_err) {
+        free(jail_err);
         DynString err = dyn_str_new();
         dyn_str_appendf(&err, "Blocked: Path '%s' is outside the workspace jail.", path);
         return err.data;
