@@ -21,7 +21,7 @@ TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontma
 TEST_TARGET = almaz_test
 MCP_HTTP_TEST_TARGET = build/test_mcp_http
 
-HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c test_holdout.c
+HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c test_holdout.c
 HOLDOUT_TARGET = almaz_holdout
 
 BENCHMARK_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c benchmark_runner.c
