@@ -1,0 +1,41 @@
+name: verify
+
+# Almaz had no CI: the only thing between a broken commit and the self-healing
+# daemon was someone remembering to run the suite. Same shape as Belya's gate --
+# build, tests, then the two DB scenarios the bootstrap fix exists for.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libcurl4-openssl-dev libsqlite3-dev python3
+
+      - name: Build
+        run: make
+
+      - name: Tests
+        run: make test
+
+      - name: Selfest on a fresh database
+        run: |
+          rm -f almaz_memory.sqlite
+          ./build/almaz --selfest
+
+      - name: Selfest on a pre-existing database (the bootstrap regression)
+        run: |
+          rm -f almaz_memory.sqlite
+          touch almaz_memory.sqlite
+          ./build/almaz --selfest
