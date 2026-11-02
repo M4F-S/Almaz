@@ -54,6 +54,8 @@ almaz.lkg
 # Deploy backups (leftover round)
 almaz.old-*
 almaz_test_asan
+almaz_crucible
+almaz_crucible_asan
 .deploy_meta
 
 # Build output (H3: the build no longer writes the deployed artifact)

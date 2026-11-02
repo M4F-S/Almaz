@@ -23,6 +23,9 @@ TEST_TARGET = almaz_test
 HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c test_holdout.c
 HOLDOUT_TARGET = almaz_holdout
 
+CRUCIBLE_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c test_crucible_adversarial.c
+CRUCIBLE_TARGET = almaz_crucible
+
 BENCHMARK_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c benchmark_runner.c
 BENCHMARK_TARGET = almaz_benchmark
 
@@ -53,6 +56,16 @@ test_asan: $(TEST_SRCS)
 	./almaz_test_asan
 
 test-asan: test_asan
+
+test-crucible: $(CRUCIBLE_TARGET)
+	./$(CRUCIBLE_TARGET)
+
+$(CRUCIBLE_TARGET): $(CRUCIBLE_SRCS)
+	$(CC) $(CFLAGS) -o $@ $(CRUCIBLE_SRCS) $(LIBS)
+
+test-crucible-asan: $(CRUCIBLE_SRCS)
+	$(CC) -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 -g -fsanitize=address,undefined -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -o almaz_crucible_asan $(CRUCIBLE_SRCS) $(LIBS)
+	./almaz_crucible_asan
 
 holdout: $(HOLDOUT_TARGET)
 	./$(HOLDOUT_TARGET)
@@ -106,9 +119,9 @@ clean:
 	# NOTE: almaz-watchdog is a DEPLOYED artifact (chattr +i, and its absence is a
 	# 203/EXEC loop) - clean must never delete it. Use `make deploy` to publish it.
 	-rm -rf $(BUILD_DIR)
-	-rm -f $(OBJS) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) test_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
+	-rm -f $(OBJS) $(TEST_TARGET) $(HOLDOUT_TARGET) $(BENCHMARK_TARGET) $(CRUCIBLE_TARGET) almaz_crucible_asan test_*.sqlite* crucible_*.sqlite* test_sample.txt bench_mem.sqlite* .belya_history .almaz_history almaz_crashes.log
 
 gdrive:
 	@./scripts/sync_to_gdrive.sh
 
-.PHONY: all test holdout test-holdout benchmark arena clean gdrive deploy release
+.PHONY: all test test_asan test-asan test-crucible test-crucible-asan holdout test-holdout benchmark arena clean gdrive deploy release
