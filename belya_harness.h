@@ -157,6 +157,8 @@ bool is_path_safe(const char *path);
 bool belya_harness_is_secret_path(const char *path);
 bool belya_harness_sockaddr_is_private(const struct sockaddr *sa);
 char *belya_troubleshooting_resolve(const char *error_trace, const char *troubleshooting_path);
+char *belya_harness_preflight_check(const char *path);
+char *belya_harness_generate_repo_map(BelyaHarness *h, size_t max_tokens);
 bool almaz_should_retrieve_memory(const char *user_input);
 
 // Autonomic Subconscious Idle Loop & Intrinsic Goal Engine

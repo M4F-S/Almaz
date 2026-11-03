@@ -27,6 +27,14 @@ typedef struct {
 
 typedef void (*TokenStreamCallback)(const char *token, bool is_reasoning, void *userdata);
 
+typedef enum {
+    PROTOCOL_AUTO = 0,
+    PROTOCOL_OPENAI,
+    PROTOCOL_ANTHROPIC,
+    PROTOCOL_HERMES,
+    PROTOCOL_DEEPSEEK
+} ModelProtocolMode;
+
 typedef struct ModelGateway {
     char *endpoint;
     char *api_key;
@@ -41,6 +49,8 @@ typedef struct ModelGateway {
     int consecutive_failures; // health watcher counter: reset on success, ++ on failure
     bool streaming;
     bool prompt_caching;
+    ModelProtocolMode protocol;
+    int thinking_budget_tokens;
     bool budget_tripped; // daily budget sealed (resets at UTC midnight on next call)
     BudgetLimits budget_limits;
     BudgetState budget_state;
@@ -52,6 +62,9 @@ typedef struct ModelGateway {
 } ModelGateway;
 
 ModelGateway *model_gateway_init(const char *endpoint, const char *api_key, const char *model);
+ModelProtocolMode model_gateway_detect_protocol(const char *endpoint, const char *model);
+void model_gateway_set_protocol(ModelGateway *gw, ModelProtocolMode protocol);
+void model_gateway_set_thinking_budget(ModelGateway *gw, int budget_tokens);
 void model_gateway_set_fallback(ModelGateway *gw, const char *endpoint, const char *api_key, const char *model);
 void model_gateway_free(ModelGateway *gw);
 void model_gateway_response_free(ModelGatewayResponse *resp);
