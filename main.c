@@ -2,6 +2,26 @@
 #include "telegram_adapter.h"
 #include <sqlite3.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <unistd.h>
+
+static void cleanup_terminal(void) {
+    if (isatty(STDOUT_FILENO)) {
+        const char *reset_seq = "\033[?25h\033[0m\n";
+        ssize_t wrc = write(STDOUT_FILENO, reset_seq, strlen(reset_seq));
+        (void)wrc;
+    }
+}
+
+static void sigint_handler(int sig) {
+    cleanup_terminal();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sig, &sa, NULL);
+    raise(sig);
+}
 
 static int selfest_check(const char *name, bool ok) {
     printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name);
@@ -107,6 +127,15 @@ static void load_env_file(const char *path) {
 }
 
 int main(int argc, char **argv) {
+    atexit(cleanup_terminal);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigint_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+
     load_env_file(".env");
 
     // Unbuffered stdout for systemd journal visibility
@@ -119,11 +148,19 @@ int main(int argc, char **argv) {
     const char *headless_prompt = NULL;
     bool no_probe = false;
 
+    bool stage_mode = false;
+    const char *preset_name = NULL;
+    bool probe_only = false;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: almaz [OPTIONS]\n\n");
             printf("Options:\n");
             printf("  -h, --help                 Show this help message\n");
+            printf("  -P, --preset <name>        Load model preset (falcon, falcon-vllm, falcon2, qwen, deepseek, airgap)\n");
+            printf("  --presets                  List all available UAE & championship model presets and exit\n");
+            printf("  --probe                    Execute gateway pre-flight health & authentication probe and exit\n");
+            printf("  -S, --stage, --telemetry   Enable live on-stage interactive visual telemetry HUD\n");
             printf("  -t, --telegram             Run as Telegram (+ Omnichannel) bot daemon\n");
             printf("  -o, --omnichannel          Alias for --telegram omnichannel daemon mode\n");
             printf("  -d, --docker <container>   Execute bash commands inside Docker sandbox container\n");
@@ -135,6 +172,16 @@ int main(int argc, char **argv) {
             printf("  --eval <prompt>            Alias for --prompt\n");
             printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n\n");
             return 0;
+        } else if (strcmp(argv[i], "--presets") == 0) {
+            model_presets_print_list();
+            return 0;
+        } else if ((strcmp(argv[i], "--preset") == 0 || strcmp(argv[i], "-P") == 0) && i + 1 < argc) {
+            preset_name = argv[++i];
+        } else if (strcmp(argv[i], "--probe") == 0) {
+            probe_only = true;
+        } else if (strcmp(argv[i], "--stage") == 0 || strcmp(argv[i], "-S") == 0 || strcmp(argv[i], "--telemetry") == 0) {
+            stage_mode = true;
+            setenv("ALMAZ_STAGE_TELEMETRY", "1", 1);
         } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0 ||
                    strcmp(argv[i], "--omnichannel") == 0 || strcmp(argv[i], "-o") == 0) {
             telegram_mode = true;
@@ -154,6 +201,24 @@ int main(int argc, char **argv) {
             headless_prompt = argv[++i];
         } else if (strcmp(argv[i], "--selfest") == 0) {
             return run_selfest();
+        } else if (argv[i][0] != '-' && !headless_prompt) {
+            headless_prompt = argv[i];
+        }
+    }
+
+    if (preset_name) {
+        const ModelPresetConfig *preset = model_preset_get(preset_name);
+        if (preset) {
+            setenv("MODEL_NAME", preset->model_name, 1);
+            setenv("MODEL_ENDPOINT", preset->endpoint, 1);
+            if (preset->is_airgap) {
+                setenv("AIRGAP_MODE", "1", 1);
+            }
+            printf("\033[1;32m[Preset Applied]:\033[0m %s -> Model: %s (%s)\n",
+                   preset->name, preset->model_name, preset->description);
+        } else {
+            fprintf(stderr, "\033[1;31m[Error] Unknown preset '%s'. Run 'almaz --presets' for options.\033[0m\n", preset_name);
+            return 1;
         }
     }
 
@@ -185,10 +250,15 @@ int main(int argc, char **argv) {
 
     // Pre-flight health and authentication probe
     const char *probe_env = getenv("GATEWAY_PREFLIGHT_PROBE");
-    if (!no_probe && (!probe_env || (strcmp(probe_env, "0") != 0 && strcmp(probe_env, "false") != 0))) {
+    if (probe_only || (!no_probe && (!probe_env || (strcmp(probe_env, "0") != 0 && strcmp(probe_env, "false") != 0)))) {
         ModelGatewayProbeResult probe = model_gateway_preflight_probe(gateway);
         model_gateway_print_probe_report(&probe);
+        bool all_ok = probe.all_ok;
         model_gateway_probe_result_free(&probe);
+        if (probe_only) {
+            model_gateway_free(gateway);
+            return all_ok ? 0 : 1;
+        }
     }
 
     // 2. Initialize Almaz Agent with persistent SQLite memory & Strategic Execution Directives
@@ -239,6 +309,9 @@ int main(int argc, char **argv) {
     if (!harness) {
         fprintf(stderr, "\033[1;31m[Error] Out of memory: failed to initialize harness.\033[0m\n");
         return 1;
+    }
+    if (stage_mode) {
+        harness->stage_mode = true;
     }
 
     if (telegram_mode) {
