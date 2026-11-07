@@ -1137,7 +1137,7 @@ static GatewayEndpointProbe probe_single_endpoint(const char *ep, const char *ke
         }
     } else {
         p.provider = xstrdup("OpenAI-Compatible");
-        char *cc = strstr(ep, "/chat/completions");
+        const char *cc = strstr(ep, "/chat/completions");
         if (cc) {
             size_t base_len = (size_t)(cc - ep);
             if (base_len < sizeof(target_url) - 16) {

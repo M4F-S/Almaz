@@ -9,7 +9,7 @@ OPT_SIZE := $(shell $(CC) -Oz -E -x c /dev/null >/dev/null 2>&1 && echo -Oz || e
 CFLAGS = -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 $(OPT_SIZE) -ffunction-sections -fdata-sections -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 LIBS = $(DEAD_STRIP) -lcurl -lsqlite3 -lm -lpthread
 
-SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c main.c
+SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c main.c
 OBJS = $(SRCS:.c=.o)
 BUILD_DIR = build
 TARGET = $(BUILD_DIR)/almaz
@@ -17,16 +17,17 @@ DEPLOY_BIN = almaz
 DEPLOY_SVC = almaz
 DEPLOY_RESTART = systemctl restart $(DEPLOY_SVC)
 
-TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_suite.c
+TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_suite.c
 TEST_TARGET = almaz_test
+MCP_HTTP_TEST_TARGET = build/test_mcp_http
 
-HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_holdout.c
+HOLDOUT_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_holdout.c
 HOLDOUT_TARGET = almaz_holdout
 
-CRUCIBLE_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_crucible_adversarial.c
+CRUCIBLE_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_crucible_adversarial.c
 CRUCIBLE_TARGET = almaz_crucible
 
-BENCHMARK_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c benchmark_runner.c
+BENCHMARK_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c benchmark_runner.c
 BENCHMARK_TARGET = almaz_benchmark
 
 WATCHDOG_TARGET = almaz-watchdog
@@ -45,8 +46,12 @@ $(WATCHDOG_TARGET): watchdog.c
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(TEST_TARGET)
+test: $(TEST_TARGET) $(MCP_HTTP_TEST_TARGET)
 	./$(TEST_TARGET)
+	./$(MCP_HTTP_TEST_TARGET)
+
+$(MCP_HTTP_TEST_TARGET): mcp_http_selftest.c mcp_http.c mcp_client.c minijson.c mcp_http.h mcp_client.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ mcp_http_selftest.c mcp_http.c mcp_client.c minijson.c $(LIBS)
 
 $(TEST_TARGET): $(TEST_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SRCS) $(LIBS)
@@ -124,4 +129,11 @@ clean:
 gdrive:
 	@./scripts/sync_to_gdrive.sh
 
-.PHONY: all test test_asan test-asan test-crucible test-crucible-asan holdout test-holdout benchmark arena clean gdrive deploy release
+.PHONY: all test test_asan test-asan test-crucible test-crucible-asan holdout test-holdout benchmark arena clean gdrive deploy release drift prd-lock
+
+# drift-guard
+drift:
+	python3 tools/drift_check.py
+
+prd-lock:
+	python3 tools/drift_check.py --update-lock

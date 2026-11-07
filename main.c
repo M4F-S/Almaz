@@ -32,13 +32,15 @@ static int run_selfest(void) {
     printf("[Selfest] Almaz self-test\n");
     int rc = 0;
     sqlite3 *db = NULL;
-    if (access("almaz_memory.sqlite", F_OK) != 0) {
-        /* Bootstrap database schema if freshly cloned */
-        BelyaAgent *ba = belya_agent_init(NULL, "almaz_memory.sqlite", NULL);
-        if (ba) belya_agent_free(ba);
-    }
-    /* R5 (2026-10-10): busy timeout on the read-only handle too. */
-    if (sqlite3_open_v2("almaz_memory.sqlite", &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+    /* Always run the schema bootstrap. Gating it on access(F_OK) meant a database
+       that already existed but predated a table never got the migration, and the
+       handle below was opened READONLY, so it could not repair itself either.
+       belya_agent_init is idempotent (CREATE ... IF NOT EXISTS). */
+    BelyaAgent *ba = belya_agent_init(NULL, "almaz_memory.sqlite", NULL);
+    if (ba) belya_agent_free(ba);
+    /* R5 (2026-10-10): busy timeout on the handle. READWRITE so migrations and
+       VACUUM work; the selfest only reads. */
+    if (sqlite3_open_v2("almaz_memory.sqlite", &db, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) {
         sqlite3_busy_timeout(db, 5000);
         printf("  [FAIL] sqlite open almaz_memory.sqlite: %s\n", sqlite3_errmsg(db));
         sqlite3_close(db);
