@@ -7907,6 +7907,18 @@ void belya_harness_execute_turn(BelyaHarness *h, const char *prompt) {
                h->last_turn_latency_ms, h->agent->confidence, h->agent->recent_form, almaz_agent_distress(h->agent), belya_get_current_rss_mb());
     }
 
+    // Closed-loop skill evolution: auto-synthesize skills upon resolving multi-step or modified runs
+    if ((step_idx >= 3 || h->files_modified_in_turn) && h->agent && h->agent->db_path[0] &&
+        strncmp(h->agent->db_path, "test_", 5) != 0 && strcmp(h->agent->db_path, ":memory:") != 0) {
+        char *auto_skill = belya_agent_reflect_and_distill(h->agent);
+        if (auto_skill) {
+            if (h->stage_mode) {
+                printf("\033[1;32m[Closed-Loop Evolution]: %s\033[0m\n", auto_skill);
+            }
+            free(auto_skill);
+        }
+    }
+
     if (h->tui_hud_enabled && isatty(STDOUT_FILENO) && !getenv("BELYA_HEADLESS") && !getenv("BELYA_TEST_MODE")) {
         TuiHudMetrics hud;
         hud.model_name = (h->agent && h->agent->gateway && h->agent->gateway->model) ? h->agent->gateway->model : "almaz";
