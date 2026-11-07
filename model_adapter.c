@@ -1122,7 +1122,7 @@ static GatewayEndpointProbe probe_single_endpoint(const char *ep, const char *ke
         snprintf(target_url, sizeof(target_url), "https://api.anthropic.com/v1/models");
     } else if (is_vllm) {
         p.provider = xstrdup(is_falcon ? "UAE TII Falcon (Local vLLM)" : "Local vLLM");
-        char *cc = strstr(ep, "/chat/completions");
+        const char *cc = strstr(ep, "/chat/completions");
         if (cc) {
             size_t base_len = (size_t)(cc - ep);
             if (base_len < sizeof(target_url) - 16) {
