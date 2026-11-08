@@ -33,6 +33,16 @@ fail() {
   exit 1
 }
 
+# H29: roll attempts to overwrite the ACTIVE slot in place, which fails with
+# ETXTBSY while that binary is executing. Copy next to it and rename instead:
+# rename swaps the directory entry, the running inode is untouched.
+rollback_to() {
+  if ! cp -a "$1" "./.almaz.rollback.new" || ! mv -f "./.almaz.rollback.new" "./$ACTIVE"; then
+    fail "rollback failed: cannot replace $ACTIVE from $1"
+  fi
+}
+
+
 # H6: the slots are chattr +i in production, so every write into a slot must clear the
 # flag first. One unlock per slot per run; the trap restores every flag we cleared - on
 # success, failure and signal alike - so a failed promote cannot leave a slot unlocked.
@@ -90,7 +100,7 @@ fi
 echo "[promote] Witness window: 90s"
 sleep 90
 if ! systemctl is-active --quiet almaz 2>/dev/null; then
-  cp -a ".$ACTIVE.rollback" "./$ACTIVE"
+  rollback_to ".$ACTIVE.rollback"
   systemctl restart almaz 2>/dev/null || true
   fail "witness failed (service inactive); rolled back to previous ACTIVE"
 fi
@@ -98,13 +108,13 @@ fi
 # Functional-ish witness: the daemon must have reported Online (Kimi K3 P1:
 # is-active alone passes alive-but-braindead candidates).
 if ! journalctl -u almaz --no-pager --since "120 seconds ago" 2>/dev/null | grep -q "Almaz Sovereign Telegram Bot Daemon Online"; then
-  cp -a ".$ACTIVE.rollback" "./$ACTIVE"
+  rollback_to ".$ACTIVE.rollback"
   systemctl restart almaz 2>/dev/null || true
   fail "witness failed (daemon did not report Online); rolled back to previous ACTIVE"
 fi
 
 grep -q "Crash-loop detected" <(journalctl -u almaz --no-pager --since "2 minutes ago" 2>/dev/null) && {
-  cp -a "./$LKG" "./$ACTIVE"
+  rollback_to "./$LKG"
   systemctl restart almaz 2>/dev/null || true
   fail "crash-loop detected during witness; rolled back to LKG=$LKG"
 }
@@ -112,7 +122,7 @@ grep -q "Crash-loop detected" <(journalctl -u almaz --no-pager --since "2 minute
 # Rotate LKG: the pre-promote ACTIVE is the newest known-good (Kimi K3 P1:
 # stale LKG ossifies the rollback target).
 unlock_slot "./$LKG"
-cp -a ".$ACTIVE.rollback" "./$LKG"
+cp -a ".$ACTIVE.rollback" "./.almaz.lkg.new" && mv -f "./.almaz.lkg.new" "./$LKG"
 echo "[promote] LKG rotated: previous ACTIVE -> $LKG"
 
 echo "[promote] SUCCESS: $STAGING promoted to ACTIVE ($ACTIVE). LKG untouched: $LKG"
