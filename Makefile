@@ -9,7 +9,7 @@ OPT_SIZE := $(shell $(CC) -Oz -E -x c /dev/null >/dev/null 2>&1 && echo -Oz || e
 CFLAGS = -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 $(OPT_SIZE) -ffunction-sections -fdata-sections -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700
 LIBS = $(DEAD_STRIP) -lcurl -lsqlite3 -lm -lpthread
 
-SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c main.c
+SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c research_inbox.c main.c
 OBJS = $(SRCS:.c=.o)
 BUILD_DIR = build
 TARGET = $(BUILD_DIR)/almaz
@@ -17,7 +17,7 @@ DEPLOY_BIN = almaz
 DEPLOY_SVC = almaz
 DEPLOY_RESTART = systemctl restart $(DEPLOY_SVC)
 
-TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c test_suite.c
+TEST_SRCS = timeline_anomaly.c budget_store.c linenoise.c minijson.c minifrontmatter.c mcp_client.c mcp_http.c jev_client.c model_adapter.c belya_agent.c belya_harness.c telegram_adapter.c belya_channel.c health_watcher.c terminal_tui.c lsp_client.c agent_mesh.c research_inbox.c test_suite.c
 TEST_TARGET = almaz_test
 MCP_HTTP_TEST_TARGET = build/test_mcp_http
 

@@ -1,4 +1,5 @@
 #include "belya_harness.h"
+#include "research_inbox.h"
 #include "telegram_adapter.h"
 #include "minifrontmatter.h"
 #include <sqlite3.h>
@@ -312,6 +313,7 @@ int main(int argc, char **argv) {
     bool cycle_mode = false;   /* T0.3: run one autonomic cycle and exit */
     bool digest_mode = false;  /* T0.5: render the daily scorecard and exit */
     int digest_hours = 24;
+    bool research_mode = false;  /* P2/T2.1: ingest bounded sources, propose — never act */
 
     bool stage_mode = false;
     const char *preset_name = NULL;
@@ -341,7 +343,8 @@ int main(int argc, char **argv) {
             printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n");
             printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n");
             printf("  --digest                   Print the daily autonomy scorecard, record it, and send it\n");
-            printf("  --digest-hours <n>         Window for --digest in hours (default 24)\n\n");
+            printf("  --digest-hours <n>         Window for --digest in hours (default 24)\n");
+            printf("  --research                 Fetch the bounded source list, store findings, map to gaps\n\n");
             return 0;
         } else if (strcmp(argv[i], "--presets") == 0) {
             model_presets_print_list();
@@ -397,6 +400,10 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--digest-hours") == 0 && i + 1 < argc) {
             int h = atoi(argv[++i]);
             if (h > 0 && h <= 720) digest_hours = h;
+        } else if (strcmp(argv[i], "--research") == 0) {
+            /* P2: research is ingestion only — no model call, no tool use. */
+            research_mode = true;
+            no_probe = true;
         } else if (argv[i][0] != '-' && !headless_prompt) {
             headless_prompt = argv[i];
         }
@@ -542,6 +549,20 @@ int main(int argc, char **argv) {
         belya_harness_free(harness);
         model_gateway_free(gateway);
         return 0;
+    }
+
+    if (research_mode) {
+        /* P2: findings are data. Nothing here executes fetched text or calls a model;
+           a suspicious item is stored, flagged, and logged as a security event. */
+        int n_feeds = 0;
+        const char *const *feeds = research_default_feeds(&n_feeds);
+        ResearchRunStats rs = research_run(agent, feeds, n_feeds);
+        printf("[research] feeds %d/%d | items %d stored %d | flagged %d | proposals %d\n",
+               rs.feeds_ok, rs.feeds_ok + rs.feeds_failed, rs.items_parsed,
+               rs.items_stored, rs.items_flagged, rs.proposals_created);
+        belya_harness_free(harness);
+        model_gateway_free(gateway);
+        return (rs.items_stored > 0 || rs.feeds_failed == 0) ? 0 : 1;
     }
 
     if (cycle_mode) {
