@@ -2539,6 +2539,14 @@ static void test_daily_digest(void) {
     belya_agent_log_timeline(agent, "autonomic_cycle", "digest test cycle");
     belya_agent_log_timeline(agent, "cycle_budget_stop", "digest test budget stop");
 
+    /* Evolution handoff (P1): the supervisor's one-line status must reach the digest. */
+    const char *evo_tmp = "/tmp/almaz_evo_status_test.txt";
+    FILE *ef = fopen(evo_tmp, "w");
+    assert(ef != NULL);
+    fputs("2026-11-17T03:00:12Z | mode=daily | accepted=1 rejected=0 | promote=off\n", ef);
+    fclose(ef);
+    setenv("ALMAZ_EVOLUTION_STATUS", evo_tmp, 1);
+
     AlmazDigest d;
     assert(almaz_digest_collect(agent, 24, &d));
     assert(d.goals_completed == 2);
@@ -2557,6 +2565,17 @@ static void test_daily_digest(void) {
     assert(strstr(text, "2 completed, 1 pending, 1 blocked") != NULL);
     assert(strstr(text, "Governor stops: 1 budget") != NULL);
     assert(strstr(text, "Top block reason: no handler") != NULL);
+    assert(strstr(d.evolution, "mode=daily") != NULL);
+    assert(strstr(text, "Evolution: 2026-11-17T03:00:12Z") != NULL);
+    /* Missing handoff must say so, not silently omit the line. */
+    setenv("ALMAZ_EVOLUTION_STATUS", "/tmp/almaz_evo_status_missing.txt", 1);
+    AlmazDigest d2;
+    assert(almaz_digest_collect(agent, 24, &d2));
+    char *text2 = almaz_digest_render(&d2);
+    assert(text2 != NULL && strstr(text2, "Evolution: no scheduled run recorded") != NULL);
+    free(text2);
+    unlink(evo_tmp);
+    unsetenv("ALMAZ_EVOLUTION_STATUS");
     printf("%s", text);
     free(text);
 

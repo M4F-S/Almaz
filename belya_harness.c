@@ -6716,6 +6716,21 @@ bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out) {
     if (agent->db_path[0] && stat(agent->db_path, &sb) == 0) {
         out->db_bytes = (long)sb.st_size;
     }
+
+    /* Evolution handoff (P1): the supervisor writes one line per run. If it is
+       missing the digest says so rather than pretending evolution ran. */
+    const char *evo_path = getenv("ALMAZ_EVOLUTION_STATUS");
+    if (!evo_path || !evo_path[0]) evo_path = "/opt/almaz-evo/reports/last_run.txt";
+    FILE *ef = fopen(evo_path, "r");
+    if (ef) {
+        if (fgets(out->evolution, sizeof(out->evolution), ef)) {
+            size_t n = strlen(out->evolution);
+            while (n > 0 && (out->evolution[n - 1] == '\n' || out->evolution[n - 1] == '\r')) {
+                out->evolution[--n] = '\0';
+            }
+        }
+        fclose(ef);
+    }
     return true;
 }
 
@@ -6743,6 +6758,11 @@ char *almaz_digest_render(const AlmazDigest *d) {
     }
     dyn_str_appendf(&out, "Process: RSS %.2fMB | DB %.1fMB\n",
                     d->rss_mb, (double)d->db_bytes / (1024.0 * 1024.0));
+    if (d->evolution[0]) {
+        dyn_str_appendf(&out, "Evolution: %.190s\n", d->evolution);
+    } else {
+        dyn_str_append(&out, "Evolution: no scheduled run recorded\n");
+    }
     return out.data ? out.data : xstrdup("Almaz daily scorecard: no data\n");
 }
 

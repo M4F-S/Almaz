@@ -191,6 +191,7 @@ typedef struct {
     double rss_mb;
     long db_bytes;
     char top_blocked[192];
+    char evolution[256];   /* one-line handoff from the evolution supervisor, if any */
 } AlmazDigest;
 
 bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out);
