@@ -79,23 +79,32 @@ static int sqlite_quick_check_state(sqlite3 *db) {
 }
 
 /* H8: the authoritative full check. Expensive, so it is only run on the failure path -
-   a corruption alert must never rest on the fast subset alone. */
-static bool sqlite_integrity_check_ok(sqlite3 *db) {
-    if (!db) return false;
+   a corruption alert must never rest on the fast subset alone.
+
+   H8b: this returns the SAME tri-state contract as sqlite_quick_check_state():
+       1 = ok, 0 = the check definitively said not-ok, -1 = unknown (could not run).
+   The previous bool version returned false for BOTH "corrupt" and "prepare/step
+   failed (busy/locked)", so a transient BUSY on a healthy database produced a
+   phantom operator corruption alert. "Could not check" must never become "corrupt". */
+static int sqlite_integrity_check_state(sqlite3 *db) {
+    if (!db) return -1;
     sqlite3_stmt *stmt = NULL;
-    bool ok = false;
-    if (sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &stmt, NULL) == SQLITE_OK) {
-        int rows = 0;
-        bool all_ok = true;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
-            const unsigned char *txt = sqlite3_column_text(stmt, 0);
-            rows++;
-            if (!txt || strcmp((const char *)txt, "ok") != 0) all_ok = false;
-        }
-        ok = (rows > 0 && all_ok);
+    if (sqlite3_prepare_v2(db, "PRAGMA integrity_check;", -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
     }
+    int rows = 0;
+    bool all_ok = true;
+    int rc = SQLITE_DONE;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        const unsigned char *txt = sqlite3_column_text(stmt, 0);
+        rows++;
+        if (!txt || strcmp((const char *)txt, "ok") != 0) all_ok = false;
+    }
+    /* Only a scan that ran to completion carries a verdict; a scan aborted by
+       BUSY/LOCKED/IOERR yields none. rows == 0 means we never got a verdict. */
+    int state = (rc == SQLITE_DONE && rows > 0) ? (all_ok ? 1 : 0) : -1;
     sqlite3_finalize(stmt);
-    return ok;
+    return state;
 }
 
 
@@ -223,6 +232,11 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                       (now - hw->last_sqlite_check_time) >= HW_SQLITE_INTERVAL)) {
         hw->last_sqlite_check_time = now;
         int qc = sqlite_quick_check_state(agent->db);
+        /* H8b: retain the initial quick_check verdict and the full-check verdict so a
+           fired alert is retroactively diagnosable. Previously only vacuum_rc was
+           logged, making "busy vs genuinely corrupt" undecidable after the fact. */
+        int qc_initial = qc;
+        int ic_verdict = -2;            /* -2 = full check never ran */
         if (qc != 1) {
             /* H8: retry, treating "unknown" as NOT corruption, then require the full
                integrity_check before this is allowed to become an operator alert. */
@@ -233,8 +247,19 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                 if (qc == 1) { persistent = false; break; }
                 if (qc == -1) { persistent = false; break; }
             }
-            if (persistent && sqlite_integrity_check_ok(agent->db)) {
-                persistent = false;   /* the full check disagrees -> not corruption */
+            if (persistent) {
+                /* H8b: tri-state. -1 (could not run) must clear ,
+                   exactly as the qc == -1 branch above does. Only a definitive
+                   0 may stand as corruption. */
+                int ic = sqlite_integrity_check_state(agent->db);
+                ic_verdict = ic;
+                if (ic != 0) {
+                    persistent = false;   /* agrees ok, or could not render a verdict */
+                    if (ic < 0) {
+                        log_timeline(agent, "sqlite integrity_check could not run "
+                                            "(busy/locked) -> not treated as corruption");
+                    }
+                }
             }
             if (persistent && !hw->sqlite_alerted) {
                 /* single retained recovery copy — a VACUUM INTO backup can be
@@ -248,8 +273,9 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                 int vrc = sqlite3_exec(agent->db, sql, NULL, NULL, &err);
                 sqlite3_free(err);
                 snprintf(summary, sizeof(summary),
-                         "sqlite quick_check FAILED -> vacuum backup attempted (/opt/almaz/recovery/almaz_db_recovery.db, vacuum_rc=%d). DB NOT deleted.",
-                         vrc);
+                         "sqlite CORRUPTION CONFIRMED (quick_check_initial=%d integrity_check=%d) -> "
+                         "vacuum backup attempted (/opt/almaz/recovery/almaz_db_recovery.db, vacuum_rc=%d). DB NOT deleted.",
+                         qc_initial, ic_verdict, vrc);
                 log_timeline(agent, summary);
                 char alert[640];
                 snprintf(alert, sizeof(alert),

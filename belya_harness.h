@@ -4,6 +4,9 @@
 #include "belya_agent.h"
 #include "linenoise.h"
 #include "mcp_client.h"
+#include "terminal_tui.h"
+#include "lsp_client.h"
+#include "agent_mesh.h"
 #include <sys/socket.h>
 #include <stdint.h>
 #include <time.h>
@@ -88,9 +91,36 @@ typedef enum {
     BELYA_BACKEND_SSH    = 2
 } BelyaExecBackend;
 
+// Super Agent Harness: Dual C ABI VTable Structural Separation
+typedef struct BelyaRouterVTable {
+    char *(*dispatch_worker_task)(BelyaAgent *agent, const JsonValue *args);
+    char *(*query_ast_graph)(BelyaAgent *agent, const JsonValue *args);
+    char *(*recall_memory)(BelyaAgent *agent, const JsonValue *args);
+    char *(*read_file)(BelyaAgent *agent, const JsonValue *args);
+    char *(*ask_user)(BelyaAgent *agent, const JsonValue *args);
+    /* Physical denial: Mutative execution callbacks are structurally NULL */
+    void *no_bash_exec;
+    void *no_write_file;
+    void *no_edit_file;
+    void *no_apply_patch;
+} BelyaRouterVTable;
+
+typedef struct BelyaWorkerVTable {
+    char *(*read_file)(BelyaAgent *agent, const JsonValue *args);
+    char *(*write_file)(BelyaAgent *agent, const JsonValue *args);
+    char *(*edit_file)(BelyaAgent *agent, const JsonValue *args);
+    char *(*apply_patch)(BelyaAgent *agent, const JsonValue *args);
+    char *(*bash)(BelyaAgent *agent, const JsonValue *args);
+    char *(*run_test_cycle)(BelyaAgent *agent, const JsonValue *args);
+    char *(*ast_slice)(BelyaAgent *agent, const JsonValue *args);
+    /* Physical denial: Operator communication callbacks are structurally NULL */
+    void *no_ask_user;
+    void *no_operator_reply;
+} BelyaWorkerVTable;
+
 struct BelyaHarness {
     BelyaAgent *agent;
-    BelyaRegisteredTool tools[64];
+    BelyaRegisteredTool tools[96];
     size_t tool_count;
     char cwd[4096];
     MCPClient *mcp_servers[8];
@@ -130,10 +160,33 @@ struct BelyaHarness {
     BelyaExecBackend exec_backend;
     char docker_container[128];
     char ssh_host[128];
+
+    // Championship Live Stage Demonstration & Autopoietic Cognitive Telemetry
+    bool stage_mode;
+    double last_turn_latency_ms;
+
+    // Super Agent Harness: Dual VTable Structural Isolation
+    bool is_router;
+    bool is_worker;
+    BelyaRouterVTable router_vtable;
+    BelyaWorkerVTable worker_vtable;
+
+    // Inter-Agent Mesh & TUI Dominance
+    AgentMesh *mesh;
+    bool tui_hud_enabled;
 };
 
 BelyaHarness *belya_harness_init(BelyaAgent *agent);
+BelyaHarness *belya_harness_init_router(BelyaAgent *agent);
+BelyaHarness *belya_harness_init_worker(BelyaAgent *agent, const char *worktree_dir);
 BelyaHarness *belya_harness_init_bounded(BelyaAgent *agent, const char *tools_whitelist, const char *role_name);
+BelyaHarness *belya_harness_get_active(void);
+void belya_harness_set_active(BelyaHarness *h);
+char *belya_harness_slice_ast(BelyaHarness *h, const char *target_symbol, size_t max_tokens);
+char *belya_dispatch_worker_task(BelyaHarness *router_harness, const char *task, const char *target_symbol, const char *test_cmd);
+char *belya_dispatch_worker_speculative(BelyaHarness *router_harness, const char *task, const char *target_symbol, const char *test_cmd, int candidate_count);
+char *belya_mesh_collaborate(BelyaHarness *h, const char *target, const char *action, const char *message);
+void belya_shadow_worktree_cleanup_all(void);
 bool belya_harness_is_tool_whitelisted(const char *whitelist, const char *tool_name);
 char *belya_agency_dispatch_subagent(BelyaHarness *parent_harness, const char *role_name, const char *task, const char *extra_context);
 bool belya_agency_triage(BelyaHarness *harness, const char *user_input, char ***out_pipeline, size_t *out_count, char **out_direct_reply);
@@ -153,6 +206,8 @@ bool is_path_safe(const char *path);
 bool belya_harness_is_secret_path(const char *path);
 bool belya_harness_sockaddr_is_private(const struct sockaddr *sa);
 char *belya_troubleshooting_resolve(const char *error_trace, const char *troubleshooting_path);
+char *belya_harness_preflight_check(const char *path);
+char *belya_harness_generate_repo_map(BelyaHarness *h, size_t max_tokens);
 bool almaz_should_retrieve_memory(const char *user_input);
 
 // Autonomic Subconscious Idle Loop & Intrinsic Goal Engine

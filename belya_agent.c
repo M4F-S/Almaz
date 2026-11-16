@@ -7,6 +7,7 @@
 
 #include "common.h"
 #include "belya_agent.h"
+#include "belya_harness.h"
 #include "minifrontmatter.h"
 #include <time.h>
 #include <ctype.h>
@@ -399,16 +400,16 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
             "5. Don't reinvent the wheel; instead, leverage proven frameworks and best practices from past successes.\n"
             "6. Zero-Tolerance Memory Safety: Always check allocation returns (malloc/calloc != NULL), validate pointer bounds, free every resource deterministically, and guarantee zero memory leaks or undefined behavior.\n\n"
             "Execution Protocol:\n"
-            "1. OBSERVE: Before modifying any file, ALWAYS call read_file first to verify its exact current contents. Do not guess line numbers, indentation, or whitespace.\n"
-            "2. THINK: State your hypothesis and reasoning in your response text BEFORE calling any tool. Explain WHY you chose this action.\n"
-            "3. ACT: Execute one focused tool call at a time. Check the result before proceeding.\n"
-            "4. VERIFY: After editing code, run the compiler or test suite to confirm your change works. If it fails, re-read the file and try a different approach.\n"
-            "5. If you fail an edit 3 times, STOP retrying the same approach. Re-read the file with read_file, identify what changed, and formulate a completely new strategy.\n"
-            "6. Git Workflow: Work strictly within a Git repository. Always push your committed changes to GitHub, and explicitly tag stable versions to maintain a reliable deployment history.\n\n"
+            "1. OBSERVE & LOCATE: Search codebase symbols or read specific lines before modifying code. Never guess function signatures, line numbers, indentation, or whitespace.\n"
+            "2. HYPOTHESIZE: State a concise, falsifiable hypothesis in text BEFORE calling tools. Explain WHY the bug or task exists and WHAT minimal change addresses it.\n"
+            "3. SURGICAL MINIMAL EDITS: Execute surgical edits that touch ONLY the necessary functions. Preserve existing comments, docstrings, formatting, and surrounding logic.\n"
+            "4. CONTINUOUS VERIFICATION: After editing any code, immediately run the project's build and test suite (e.g. make test, cargo test) via bash. If tests fail, inspect the exact compiler diagnostic or assertion failure and fix it autonomously.\n"
+            "5. REPETITIVE FAILURE CIRCUIT BREAKER: If an edit or test fails twice, STOP guessing. Re-read the neighborhood lines to see the actual file state, inspect diagnostics, and formulate a fresh hypothesis.\n"
+            "6. GIT DISCIPLINE: Work strictly within the Git repository. Create conventional commits and explicitly tag stable milestones to maintain reliable deployment history.\n\n"
             "Tool Constraints:\n"
             "- edit_file: old_text must EXACTLY match the file content character-for-character, including all leading spaces, tabs, and newlines. ALWAYS read_file first.\n"
             "- bash: Do NOT run interactive commands (vim, nano, top, less, man, sudo). They will hang. Use cat, head, tail, sed, awk, grep instead.\n"
-            "- search_files: Returns max 50 matches. Use file_glob or regex to narrow scope.\n"
+            "- search_files: Fast ripgrep/grep search. Returns max 50 matches. Use file_glob or regex to narrow scope.\n"
             "- For large files (>200 lines), use read_file with offset and limit parameters.\n\n"
             "Conversational & Greeting Protocol:\n"
             "- When the user sends a greeting (e.g., 'hello', 'hi', 'hey'), pleasantry, or introductory question (e.g., 'who are you', 'what can you do'), respond conversationally, concisely, and naturally in plain text. DO NOT invoke any tools or output JSON function calls for simple greetings.\n"
@@ -417,8 +418,8 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
         );
     }
 
-    // Check for repository guidelines (.agentrules / AGENT.md / AGENTS.md / GEMINI.md / CLAUDE.md)
-    const char *rules_files[] = {".agentrules", "AGENT.md", "AGENTS.md", "GEMINI.md", "CLAUDE.md", NULL};
+    // Check for repository guidelines (ALMAZRULES.md / Almaz.md / BELYARULES.md / Belya.md / .agentrules / AGENT.md / AGENTS.md / GEMINI.md / CLAUDE.md)
+    const char *rules_files[] = {"ALMAZRULES.md", "Almaz.md", "ALMAZ.md", "BELYARULES.md", "Belya.md", "BELYA.md", ".agentrules", "AGENT.md", "AGENTS.md", "GEMINI.md", "CLAUDE.md", NULL};
     for (int rf = 0; rules_files[rf]; rf++) {
         FILE *rfp = fopen(rules_files[rf], "r");
         if (rfp) {
@@ -518,24 +519,70 @@ void belya_agent_add_tool_result(BelyaAgent *agent, const char *tool_call_id, co
     const char *limit_env = getenv("TOOL_OUTPUT_LIMIT");
     size_t limit_bytes = (limit_env && atoi(limit_env) > 500) ? (size_t)atoi(limit_env) : 8000;
 
-    if (result && strlen(result) > limit_bytes) {
+    if (result && strlen(result) > 0) {
         size_t total_len = strlen(result);
-        size_t half = limit_bytes / 2;
-        size_t head_len = half > 1500 ? (half - 500) : half;
-        size_t tail_len = half > 1500 ? (half + 500) : half;
-        if (head_len + tail_len > limit_bytes) {
-            head_len = limit_bytes / 2;
-            tail_len = limit_bytes - head_len;
-        }
 
-        DynString ds = dyn_str_new();
-        dyn_str_append_len(&ds, result, head_len);
-        dyn_str_appendf(&ds, "\n\n[... Output truncated: %zu bytes omitted of %zu total bytes to preserve context & speed ...]\n\n",
-                        total_len - (head_len + tail_len), total_len);
-        dyn_str_append_len(&ds, result + (total_len - tail_len), tail_len);
-        m->content = ds.data;
+        // Count total lines to support line-aware dual-head folding
+        size_t line_count = 0;
+        for (size_t p = 0; p < total_len; p++) {
+            if (result[p] == '\n') line_count++;
+        }
+        if (total_len > 0 && result[total_len - 1] != '\n') line_count++;
+
+        if (line_count > 60 || total_len > limit_bytes) {
+            const char *head_end = NULL;
+            const char *tail_start = NULL;
+
+            if (line_count > 60) {
+                // Find end of line 15
+                size_t l_idx = 0;
+                const char *s = result;
+                while (*s && l_idx < 15) {
+                    if (*s == '\n') l_idx++;
+                    s++;
+                }
+                head_end = s;
+
+                // Find start of line (line_count - 30)
+                size_t target_tail_line = (line_count > 30) ? (line_count - 30) : 0;
+                l_idx = 0;
+                s = result;
+                while (*s && l_idx < target_tail_line) {
+                    if (*s == '\n') l_idx++;
+                    s++;
+                }
+                tail_start = s;
+
+                // Guard: if head_end >= tail_start or combined byte length exceeds limit_bytes, fall back to byte bounds
+                if (head_end >= tail_start || ((size_t)(head_end - result) + (size_t)(result + total_len - tail_start)) > limit_bytes) {
+                    head_end = NULL;
+                    tail_start = NULL;
+                }
+            }
+
+            if (!head_end || !tail_start) {
+                size_t half = limit_bytes / 2;
+                size_t head_len = half > 1500 ? (half - 500) : half;
+                size_t tail_len = half > 1500 ? (half + 500) : half;
+                if (head_len + tail_len > limit_bytes) {
+                    head_len = limit_bytes / 2;
+                    tail_len = limit_bytes - head_len;
+                }
+                head_end = result + head_len;
+                tail_start = result + (total_len - tail_len);
+            }
+
+            DynString ds = dyn_str_new();
+            dyn_str_append_len(&ds, result, (size_t)(head_end - result));
+            dyn_str_appendf(&ds, "\n\n[... Output truncated: %zu bytes omitted of %zu total bytes to preserve context & speed ...]\n\n",
+                            (size_t)(tail_start - head_end), total_len);
+            dyn_str_append(&ds, tail_start);
+            m->content = ds.data;
+        } else {
+            m->content = xstrdup(result);
+        }
     } else {
-        m->content = xstrdup(result ? result : "");
+        m->content = xstrdup("");
     }
 }
 
@@ -662,6 +709,28 @@ static char *sanitize_fts5_query(const char *raw) {
     return ds.data;
 }
 
+/* P2: a single agent_memory row can hold an entire archived transcript. The
+   recall path previously interpolated the whole `content` column into model
+   context, so one oversized row could flood the turn budget. Cap the knowledge
+   text per entry, backing off to a UTF-8 boundary so a multi-byte codepoint is
+   never split, and mark the elision so the model knows text was removed. */
+#define MEMORY_ENTRY_CONTENT_CAP 800
+
+static void append_content_capped(DynString *out, const char *txt) {
+    if (!txt) return;
+    size_t n = strlen(txt);
+    if (n <= MEMORY_ENTRY_CONTENT_CAP) {
+        dyn_str_append(out, txt);
+        return;
+    }
+    size_t cut = MEMORY_ENTRY_CONTENT_CAP;
+    /* Back off over UTF-8 continuation bytes (0b10xxxxxx) to a lead byte. */
+    while (cut > 0 && ((unsigned char)txt[cut] & 0xC0) == 0x80) cut--;
+    if (cut == 0) cut = MEMORY_ENTRY_CONTENT_CAP; /* malformed UTF-8: cap anyway */
+    dyn_str_appendf(out, "%.*s", (int)cut, txt);
+    dyn_str_appendf(out, "\n...[truncated %zu of %zu bytes]", n - cut, n);
+}
+
 char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
     if (!agent->db) return xstrdup("Memory database not active.");
     DynString out = dyn_str_new();
@@ -688,8 +757,10 @@ char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
                 double sal = sqlite3_column_double(stmt, 5);
                 int acc = sqlite3_column_int(stmt, 6);
 
-                dyn_str_appendf(&out, "=== Memory Entry [Wing: %s | Room: %s | Salience: %.1f | Hits: %d] ===\nTopic: %s\nKnowledge: %s\n\n",
-                    w ? w : "default", r ? r : "general", sal, acc + 1, top ? top : "", txt ? txt : "");
+                dyn_str_appendf(&out, "=== Memory Entry [Wing: %s | Room: %s | Salience: %.1f | Hits: %d] ===\nTopic: %s\nKnowledge: ",
+                    w ? w : "default", r ? r : "general", sal, acc + 1, top ? top : "");
+                append_content_capped(&out, txt);
+                dyn_str_append(&out, "\n\n");
 
                 // Update recency & salience boost
                 sqlite3_stmt *up_stmt;
@@ -729,8 +800,10 @@ char *belya_agent_search_memory(BelyaAgent *agent, const char *query) {
                 double sal = sqlite3_column_double(stmt, 5);
                 int acc = sqlite3_column_int(stmt, 6);
 
-                dyn_str_appendf(&out, "=== Memory Entry [Wing: %s | Room: %s | Salience: %.1f | Hits: %d] ===\nTopic: %s\nKnowledge: %s\n\n",
-                    w ? w : "default", r ? r : "general", sal, acc + 1, top ? top : "", txt ? txt : "");
+                dyn_str_appendf(&out, "=== Memory Entry [Wing: %s | Room: %s | Salience: %.1f | Hits: %d] ===\nTopic: %s\nKnowledge: ",
+                    w ? w : "default", r ? r : "general", sal, acc + 1, top ? top : "");
+                append_content_capped(&out, txt);
+                dyn_str_append(&out, "\n\n");
 
                 // Update recency
                 sqlite3_stmt *up_stmt;
@@ -1602,6 +1675,27 @@ char *belya_agent_reflect_and_distill(BelyaAgent *agent) {
     if (strlen(topic) > 60) {
         topic[57] = '.'; topic[58] = '.'; topic[59] = '.'; topic[60] = '\0';
     }
+
+    // Auto-generate clean slug name for disk persistence into skills/<slug>/SKILL.md
+    char slug[64] = "auto_";
+    size_t s_idx = 5;
+    const char *raw_prompt = (agent->messages[1].content) ? agent->messages[1].content : "workflow";
+    for (size_t p = 0; raw_prompt[p] && s_idx < sizeof(slug) - 1; p++) {
+        char ch = raw_prompt[p];
+        if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
+            slug[s_idx++] = (ch >= 'A' && ch <= 'Z') ? (char)(ch + 32) : ch;
+        } else if (s_idx > 5 && slug[s_idx - 1] != '_') {
+            slug[s_idx++] = '_';
+        }
+    }
+    while (s_idx > 5 && slug[s_idx - 1] == '_') s_idx--;
+    slug[s_idx] = '\0';
+    if (s_idx <= 5) {
+        snprintf(slug, sizeof(slug), "auto_skill_%ld", (long)time(NULL));
+    }
+
+    // Closed-Loop Evolution: Save and mirror to skills/<slug>/SKILL.md (for persistent DBs)
+    belya_agent_save_skill(agent, slug, raw_prompt, topic, skill.data);
 
     belya_agent_persist_memory(agent, topic, skill.data);
     dyn_str_free(&skill);
@@ -2618,6 +2712,144 @@ bool belya_agent_export_trajectory(BelyaAgent *agent, const char *session_id, co
     return true;
 }
 
+bool belya_agent_export_sharegpt(BelyaAgent *agent, const char *session_id, const char *out_path) {
+    if (!agent) return false;
+
+    char default_path[256];
+    if (!out_path || strlen(out_path) == 0) {
+        time_t now = time(NULL);
+        struct tm *tm = gmtime(&now);
+        strftime(default_path, sizeof(default_path), "sharegpt_%Y%m%d_%H%M%S.jsonl", tm);
+        out_path = default_path;
+    }
+
+    FILE *f = fopen(out_path, "a");
+    if (!f) return false;
+
+    JsonValue *root = json_create_object();
+    JsonValue *convs_arr = json_create_array();
+
+    if (session_id && strlen(session_id) > 0 && agent->db) {
+        sqlite3_stmt *stmt;
+        const char *sql = "SELECT role, content FROM session_messages WHERE session_id = ? ORDER BY idx ASC;";
+        if (sqlite3_prepare_v2(agent->db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, session_id, -1, SQLITE_STATIC);
+            while (sqlite3_step(stmt) == SQLITE_ROW) {
+                const char *role = (const char *)sqlite3_column_text(stmt, 0);
+                const char *content = (const char *)sqlite3_column_text(stmt, 1);
+
+                const char *from_role = "gpt";
+                if (!role || strcmp(role, "system") == 0) from_role = "system";
+                else if (strcmp(role, "user") == 0) from_role = "human";
+                else if (strcmp(role, "assistant") == 0) from_role = "gpt";
+                else if (strcmp(role, "tool") == 0) from_role = "tool";
+
+                JsonValue *m = json_create_object();
+                json_obj_add(m, "from", json_create_string(from_role));
+                json_obj_add(m, "value", json_create_string(content ? content : ""));
+                json_arr_add(convs_arr, m);
+            }
+            sqlite3_finalize(stmt);
+        }
+    } else {
+        for (size_t i = 0; i < agent->msg_count; i++) {
+            const char *from_role = "gpt";
+            if (!agent->messages[i].role || strcmp(agent->messages[i].role, "system") == 0) from_role = "system";
+            else if (strcmp(agent->messages[i].role, "user") == 0) from_role = "human";
+            else if (strcmp(agent->messages[i].role, "assistant") == 0) from_role = "gpt";
+            else if (strcmp(agent->messages[i].role, "tool") == 0) from_role = "tool";
+
+            JsonValue *m = json_create_object();
+            json_obj_add(m, "from", json_create_string(from_role));
+            json_obj_add(m, "value", json_create_string(agent->messages[i].content ? agent->messages[i].content : ""));
+            json_arr_add(convs_arr, m);
+        }
+    }
+
+    json_obj_add(root, "conversations", convs_arr);
+    char *serialized = json_serialize(root);
+    if (serialized) {
+        fprintf(f, "%s\n", serialized);
+        free(serialized);
+    }
+    json_free(root);
+    fclose(f);
+
+    char summary[512];
+    snprintf(summary, sizeof(summary), "ShareGPT trajectory exported to %s", out_path);
+    belya_agent_log_timeline(agent, "sharegpt_exported", summary);
+    return true;
+}
+
+bool belya_agent_export_dpo(BelyaAgent *agent, const char *session_id, const char *out_path) {
+    if (!agent) return false;
+    (void)session_id;
+
+    char default_path[256];
+    if (!out_path || strlen(out_path) == 0) {
+        time_t now = time(NULL);
+        struct tm *tm = gmtime(&now);
+        strftime(default_path, sizeof(default_path), "dpo_%Y%m%d_%H%M%S.jsonl", tm);
+        out_path = default_path;
+    }
+
+    FILE *f = fopen(out_path, "a");
+    if (!f) return false;
+
+    int emitted_pairs = 0;
+
+    // Scan agent messages to extract preference triples (prompt, chosen, rejected)
+    for (size_t i = 0; i < agent->msg_count; i++) {
+        if (!agent->messages[i].role || strcmp(agent->messages[i].role, "user") != 0) continue;
+        const char *prompt_text = agent->messages[i].content ? agent->messages[i].content : "";
+
+        const char *chosen_text = NULL;
+        const char *rejected_text = NULL;
+
+        // Inspect subsequent assistant and tool responses for failure-recovery or final solution
+        for (size_t j = i + 1; j < agent->msg_count; j++) {
+            if (agent->messages[j].role && strcmp(agent->messages[j].role, "user") == 0) break;
+
+            if (agent->messages[j].role && strcmp(agent->messages[j].role, "tool") == 0) {
+                const char *tc = agent->messages[j].content;
+                if (tc && (strstr(tc, "Error:") || strstr(tc, "FAILED") || strstr(tc, "denied"))) {
+                    // Preceding assistant turn produced a rejected attempt
+                    if (j > 0 && agent->messages[j - 1].role && strcmp(agent->messages[j - 1].role, "assistant") == 0) {
+                        rejected_text = agent->messages[j - 1].content;
+                    }
+                }
+            } else if (agent->messages[j].role && strcmp(agent->messages[j].role, "assistant") == 0) {
+                chosen_text = agent->messages[j].content;
+            }
+        }
+
+        if (!chosen_text) continue;
+        if (!rejected_text) {
+            rejected_text = "I am unable to complete this request or resolve the specified task.";
+        }
+
+        JsonValue *pair = json_create_object();
+        json_obj_add(pair, "prompt", json_create_string(prompt_text));
+        json_obj_add(pair, "chosen", json_create_string(chosen_text));
+        json_obj_add(pair, "rejected", json_create_string(rejected_text));
+
+        char *serialized = json_serialize(pair);
+        if (serialized) {
+            fprintf(f, "%s\n", serialized);
+            free(serialized);
+            emitted_pairs++;
+        }
+        json_free(pair);
+    }
+
+    fclose(f);
+
+    char summary[512];
+    snprintf(summary, sizeof(summary), "DPO dataset (%d pairs) exported to %s", emitted_pairs, out_path);
+    belya_agent_log_timeline(agent, "dpo_exported", summary);
+    return true;
+}
+
 char *belya_agent_search_conversations(BelyaAgent *agent, const char *query) {
     if (!agent || !agent->db) return xstrdup("Database not available for conversation history search.");
     if (!query || strlen(query) == 0) return xstrdup("Error: Missing query string for conversation search.");
@@ -2839,6 +3071,49 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
                                 agent->gateway->model, provider, agent->gateway->model, provider);
             }
 
+            if (strstr(dynamic_part.data, "=== Repository Factsheet") == NULL) {
+                dyn_str_append(&dynamic_part, "\n=== Repository Factsheet (Auto-Detected) ===\n");
+                if (access("Makefile", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: C/POSIX Makefile\nPrimary Verification: 'make test'\n");
+                } else if (access("Cargo.toml", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: Rust / Cargo\nPrimary Verification: 'cargo test'\n");
+                } else if (access("package.json", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: Node / TypeScript\nPrimary Verification: 'npm test'\n");
+                } else if (access("CMakeLists.txt", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: CMake\nPrimary Verification: 'ctest'\n");
+                } else if (access("go.mod", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: Go Module\nPrimary Verification: 'go test ./...'\n");
+                } else if (access("pyproject.toml", F_OK) == 0) {
+                    dyn_str_append(&dynamic_part, "Project Engine: Python\nPrimary Verification: 'pytest'\n");
+                }
+
+                FILE *gh = fopen(".git/HEAD", "r");
+                if (gh) {
+                    char head_buf[256];
+                    if (fgets(head_buf, sizeof(head_buf), gh)) {
+                        char *nl = strchr(head_buf, '\n');
+                        if (nl) *nl = '\0';
+                        char *cr = strchr(head_buf, '\r');
+                        if (cr) *cr = '\0';
+                        if (strncmp(head_buf, "ref: refs/heads/", 16) == 0) {
+                            dyn_str_appendf(&dynamic_part, "Git Branch: %s\n", head_buf + 16);
+                        } else if (strlen(head_buf) > 0) {
+                            head_buf[10] = '\0';
+                            dyn_str_appendf(&dynamic_part, "Git Commit: %s (detached)\n", head_buf);
+                        }
+                    }
+                    fclose(gh);
+                }
+
+                if (agent->user_data) {
+                    char *repo_map = belya_harness_generate_repo_map((BelyaHarness *)agent->user_data, 350);
+                    if (repo_map) {
+                        dyn_str_appendf(&dynamic_part, "\n=== Architecture & Symbol Skeleton ===\n%s\n", repo_map);
+                        free(repo_map);
+                    }
+                }
+            }
+
             if (use_anthropic_cache_blocks) {
                 JsonValue *content_arr = json_create_array();
 
@@ -2968,8 +3243,12 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         json_arr_add(messages_arr, telem_msg);
     }
 
-    // If model does not support API tools (like deepseek-r1 in Ollama), inject tool instructions in system message
-    if (agent->gateway && agent->gateway->model && strstr(agent->gateway->model, "deepseek-r1") != NULL && agent->schema_count > 0) {
+    // If model does not support API tools (like deepseek-r1 or local falcon in Ollama), inject tool instructions in system message
+    if (agent->gateway && agent->gateway->model &&
+        (strstr(agent->gateway->model, "deepseek-r1") != NULL ||
+         strstr(agent->gateway->model, "falcon") != NULL ||
+         strstr(agent->gateway->model, "Falcon") != NULL) &&
+        agent->schema_count > 0) {
         JsonValue *tool_guide_msg = json_create_object();
         json_obj_add(tool_guide_msg, "role", json_create_string("system"));
         DynString tg = dyn_str_new();
@@ -3004,7 +3283,13 @@ ModelGatewayResponse belya_agent_step(BelyaAgent *agent) {
         json_arr_add(tools_arr, t);
     }
 
-    ModelGatewayResponse resp = agent->gateway->chat_complete(agent->gateway, messages_arr, tools_arr);
+    ModelGatewayResponse resp;
+    memset(&resp, 0, sizeof(ModelGatewayResponse));
+    if (agent->gateway && agent->gateway->chat_complete) {
+        resp = agent->gateway->chat_complete(agent->gateway, messages_arr, tools_arr);
+    } else {
+        resp.content = xstrdup("Error: Model gateway is not configured or offline.");
+    }
 
     // Accumulate token economics
     agent->total_prompt_tokens += resp.prompt_tokens;
@@ -3201,7 +3486,13 @@ ModelGatewayResponse belya_agent_step_forced_text(BelyaAgent *agent, const char 
     }
 
     // Explicitly pass tools_schema = NULL to force conversational synthesis
-    ModelGatewayResponse resp = agent->gateway->chat_complete(agent->gateway, messages_arr, NULL);
+    ModelGatewayResponse resp;
+    memset(&resp, 0, sizeof(ModelGatewayResponse));
+    if (agent->gateway && agent->gateway->chat_complete) {
+        resp = agent->gateway->chat_complete(agent->gateway, messages_arr, NULL);
+    } else {
+        resp.content = xstrdup("Error: Model gateway is not configured or offline.");
+    }
 
     agent->total_prompt_tokens += resp.prompt_tokens;
     agent->total_completion_tokens += resp.completion_tokens;
