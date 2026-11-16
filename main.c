@@ -132,6 +132,8 @@ int main(int argc, char **argv) {
     const char *headless_prompt = NULL;
     bool no_probe = false;
     bool cycle_mode = false;   /* T0.3: run one autonomic cycle and exit */
+    bool digest_mode = false;  /* T0.5: render the daily scorecard and exit */
+    int digest_hours = 24;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -148,7 +150,9 @@ int main(int argc, char **argv) {
             printf("  --headless <prompt>        Alias for --prompt\n");
             printf("  --eval <prompt>            Alias for --prompt\n");
             printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n");
-            printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n\n");
+            printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n");
+            printf("  --digest                   Print the daily autonomy scorecard, record it, and send it\n");
+            printf("  --digest-hours <n>         Window for --digest in hours (default 24)\n\n");
             return 0;
         } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0 ||
                    strcmp(argv[i], "--omnichannel") == 0 || strcmp(argv[i], "-o") == 0) {
@@ -173,6 +177,13 @@ int main(int argc, char **argv) {
             /* T0.3: clock-triggered autonomy — no chat idleness, no model call. */
             cycle_mode = true;
             no_probe = true;
+        } else if (strcmp(argv[i], "--digest") == 0) {
+            /* T0.5: scorecard is deterministic — no model call needed. */
+            digest_mode = true;
+            no_probe = true;
+        } else if (strcmp(argv[i], "--digest-hours") == 0 && i + 1 < argc) {
+            int h = atoi(argv[++i]);
+            if (h > 0 && h <= 720) digest_hours = h;
         }
     }
 
@@ -258,6 +269,40 @@ int main(int argc, char **argv) {
     if (!harness) {
         fprintf(stderr, "\033[1;31m[Error] Out of memory: failed to initialize harness.\033[0m\n");
         return 1;
+    }
+
+    if (digest_mode) {
+        /* T0.5: the scorecard is a report, never a decision — so it is recorded and
+           delivered even if Telegram is unreachable, and its exit code reflects the
+           report, not the delivery. */
+        AlmazDigest d;
+        if (!almaz_digest_collect(agent, digest_hours, &d)) {
+            fprintf(stderr, "[digest] failed to collect scorecard\n");
+            belya_harness_free(harness);
+            model_gateway_free(gateway);
+            return 1;
+        }
+        char *text = almaz_digest_render(&d);
+        printf("%s", text ? text : "");
+        if (text) {
+            belya_agent_log_timeline(agent, "daily_digest", text);
+            if (tg_token && tg_chat_id && tg_token[0] && tg_chat_id[0]) {
+                TelegramBot *bot = telegram_bot_init(tg_token, tg_chat_id);
+                if (bot) {
+                    bool sent = telegram_bot_send_chunks(bot, tg_chat_id, text);
+                    printf("[digest] telegram=%s\n", sent ? "sent" : "failed");
+                    telegram_bot_free(bot);
+                } else {
+                    printf("[digest] telegram=init_failed\n");
+                }
+            } else {
+                printf("[digest] telegram=not_configured\n");
+            }
+            free(text);
+        }
+        belya_harness_free(harness);
+        model_gateway_free(gateway);
+        return 0;
     }
 
     if (cycle_mode) {

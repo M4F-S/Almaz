@@ -6634,6 +6634,120 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     return true;
 }
 
+/* ---- T0.5 daily scorecard -------------------------------------------------- */
+
+static int digest_scalar(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *st = NULL;
+    int v = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    return v;
+}
+
+bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out) {
+    if (!agent || !agent->db || !out) return false;
+    memset(out, 0, sizeof(*out));
+    if (hours <= 0) hours = 24;
+    sqlite3 *db = agent->db;
+    char q[512];
+
+    /* Window activity, straight from the timeline (the audit trail, not a guess). */
+    snprintf(q, sizeof(q),
+        "SELECT "
+        " SUM(event_type='autonomic_cycle'),"
+        " SUM(event_type='goal_outcome'),"
+        " SUM(event_type='anomaly_acknowledged'),"
+        " SUM(event_type='cycle_budget_stop'),"
+        " SUM(event_type='cycle_time_stop')"
+        " FROM agent_timeline WHERE created_at >= datetime('now','-%d hours');", hours);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            out->cycles         = sqlite3_column_int(st, 0);
+            out->goal_actions   = sqlite3_column_int(st, 1);
+            out->anomalies      = sqlite3_column_int(st, 2);
+            out->budget_stops   = sqlite3_column_int(st, 3);
+            out->time_stops     = sqlite3_column_int(st, 4);
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Current queue shape. */
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='completed';");
+    out->goals_completed = digest_scalar(db, q);
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='pending';");
+    out->goals_pending = digest_scalar(db, q);
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='blocked';");
+    out->goals_blocked = digest_scalar(db, q);
+
+    /* Completed inside the window — the number that answers "did it work today". */
+    snprintf(q, sizeof(q),
+        "SELECT COUNT(*) FROM agent_goals WHERE completed_at >= datetime('now','-%d hours');", hours);
+    out->completed_window = digest_scalar(db, q);
+
+    /* Most frequent blocking reason, so the digest says WHY, not just how many. */
+    snprintf(q, sizeof(q),
+        "SELECT COALESCE(blocked_reason,'') FROM agent_goals WHERE status='blocked' "
+        "AND COALESCE(blocked_reason,'')<>'' GROUP BY blocked_reason ORDER BY COUNT(*) DESC LIMIT 1;");
+    st = NULL;
+    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *r = (const char *)sqlite3_column_text(st, 0);
+            if (r) snprintf(out->top_blocked, sizeof(out->top_blocked), "%s", r);
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Spend, from the same accounting the governor uses. */
+    if (agent->gateway) {
+        ModelGateway *gw = agent->gateway;
+        out->tokens_cap = gw->budget_limits.daily_tokens;
+        if (budget_state_day_is_today(&gw->budget_state)) {
+            out->tokens_used = gw->budget_state.tokens_used;
+            out->calls = gw->budget_state.calls;
+        }
+    }
+
+    out->rss_mb = belya_get_current_rss_mb();
+
+    struct stat sb;
+    if (agent->db_path[0] && stat(agent->db_path, &sb) == 0) {
+        out->db_bytes = (long)sb.st_size;
+    }
+    return true;
+}
+
+char *almaz_digest_render(const AlmazDigest *d) {
+    if (!d) return NULL;
+    DynString out = dyn_str_new();
+    dyn_str_append(&out, "Almaz daily scorecard (last 24h)\n");
+    dyn_str_appendf(&out, "Autonomy: %d cycle(s), %d goal action(s), %d anomaly-ish event(s)\n",
+                    d->cycles, d->goal_actions, d->anomalies);
+    dyn_str_appendf(&out, "Goals done in window: %d | queue: %d completed, %d pending, %d blocked\n",
+                    d->completed_window, d->goals_completed, d->goals_pending, d->goals_blocked);
+    if (d->tokens_cap > 0) {
+        dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s)\n",
+                        d->tokens_used, d->tokens_cap, d->calls);
+    } else {
+        dyn_str_appendf(&out, "Spend today: %ld tokens, %ld call(s) (no daily cap set)\n",
+                        d->tokens_used, d->calls);
+    }
+    dyn_str_appendf(&out, "Governor stops: %d budget, %d wall-clock\n",
+                    d->budget_stops, d->time_stops);
+    if (d->top_blocked[0]) {
+        dyn_str_appendf(&out, "Top block reason: %.150s\n", d->top_blocked);
+    } else if (d->goals_blocked == 0) {
+        dyn_str_append(&out, "Top block reason: none\n");
+    }
+    dyn_str_appendf(&out, "Process: RSS %.2fMB | DB %.1fMB\n",
+                    d->rss_mb, (double)d->db_bytes / (1024.0 * 1024.0));
+    return out.data ? out.data : xstrdup("Almaz daily scorecard: no data\n");
+}
+
+/* ---- Autonomic cycle ------------------------------------------------------- */
+
 bool almaz_autonomy_enabled(void) {
     const char *v = getenv("ALMAZ_AUTONOMY");
     if (!v || !v[0]) return true;              /* unset = enabled */

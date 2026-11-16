@@ -172,6 +172,30 @@ AlmazCycleLimits almaz_cycle_limits_from_env(void);
 /* True when the daily budget allows another cycle; out_remaining gets the tokens
    left today (-1 when no token cap is configured). */
 bool almaz_cycle_budget_ok(BelyaAgent *agent, const AlmazCycleLimits *lim, long *out_remaining);
+/* T0.5 daily scorecard: what the organism did on its own, as numbers — cycles,
+   goal outcomes in the window, current queue, spend against the cap, and the
+   reasons anything is blocked. Deterministic; no model call, no network. */
+typedef struct {
+    int cycles;
+    int goal_actions;
+    int anomalies;
+    int budget_stops;
+    int time_stops;
+    int goals_completed;
+    int goals_pending;
+    int goals_blocked;
+    int completed_window;
+    long tokens_used;
+    long tokens_cap;
+    long calls;
+    double rss_mb;
+    long db_bytes;
+    char top_blocked[192];
+} AlmazDigest;
+
+bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out);
+/* Caller owns the returned string. */
+char *almaz_digest_render(const AlmazDigest *d);
 void almaz_goals_generate_deterministic(BelyaHarness *h);
 bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);

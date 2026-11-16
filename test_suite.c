@@ -2507,6 +2507,64 @@ static void test_cycle_budget_governor(void) {
     printf("  -> Cycle Budget Governor PASSED\n");
 }
 
+static void test_daily_digest(void) {
+    printf("[Test] Daily digest / scorecard (T0.5)...\n");
+    ModelGateway *gw = model_gateway_init("http://127.0.0.1:1/v1/chat/completions", "none", "fake-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+    assert(h != NULL);
+    char *s = NULL;
+
+    /* Two goals with real handlers -> completed. */
+    assert(almaz_goals_add(agent->db, "verify_workspace_integrity", "CODE_AUDIT", 50, "digest A"));
+    assert(almaz_goals_add(agent->db, "refresh_self_model", "MAINTENANCE", 40, "digest B"));
+    for (int i = 0; i < 2; i++) {
+        assert(almaz_goals_process_next(h, &s));
+        free(s);
+        s = NULL;
+    }
+
+    /* One goal with no handler -> blocked, with a reason. */
+    assert(almaz_goals_add(agent->db, "digest_unknown_work", "CODE_AUDIT", 30, "digest C"));
+    assert(almaz_goals_process_next(h, &s));
+    free(s);
+    s = NULL;
+
+    /* One parked goal at the attempt ceiling -> stays pending. */
+    assert(sqlite3_exec(agent->db,
+        "INSERT INTO agent_goals (goal,category,priority,status,rationale,attempts) "
+        "VALUES ('parked_goal','MAINTENANCE',1,'pending','digest D',3);", 0, 0, 0) == SQLITE_OK);
+
+    /* Timeline events the digest reports. */
+    belya_agent_log_timeline(agent, "autonomic_cycle", "digest test cycle");
+    belya_agent_log_timeline(agent, "cycle_budget_stop", "digest test budget stop");
+
+    AlmazDigest d;
+    assert(almaz_digest_collect(agent, 24, &d));
+    assert(d.goals_completed == 2);
+    assert(d.goals_blocked == 1);
+    assert(d.goals_pending == 1);
+    assert(d.completed_window == 2);
+    assert(d.cycles == 1);
+    assert(d.budget_stops == 1);
+    assert(strlen(d.top_blocked) > 0);
+    assert(d.rss_mb > 0.0);
+
+    char *text = almaz_digest_render(&d);
+    assert(text != NULL);
+    assert(strstr(text, "Almaz daily scorecard") != NULL);
+    assert(strstr(text, "Goals done in window: 2") != NULL);
+    assert(strstr(text, "2 completed, 1 pending, 1 blocked") != NULL);
+    assert(strstr(text, "Governor stops: 1 budget") != NULL);
+    assert(strstr(text, "Top block reason: no handler") != NULL);
+    printf("%s", text);
+    free(text);
+
+    belya_harness_free(h);   /* frees the agent it was handed too */
+    model_gateway_free(gw);
+    printf("  -> Daily Digest PASSED\n");
+}
+
 static void test_health_watcher(void) {
     printf("--- Health Watcher ---\n");
 
@@ -4331,6 +4389,7 @@ int main(void) {
     test_goal_queue_progress();
     test_autonomy_kill_switch();
     test_cycle_budget_governor();
+    test_daily_digest();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
