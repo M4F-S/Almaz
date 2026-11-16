@@ -32,6 +32,43 @@ REPORTS_DIR = WORKSPACE_DIR / "reports"
 ENV_FILE = WORKSPACE_DIR / ".env"
 MUTATION_HISTORY_FILE = REPORTS_DIR / "mutation_history.json"
 
+# --- P1 guardrails: report-only scheduling -----------------------------------
+# A scheduled evolution run must be bounded and must never promote on its own.
+# The systemd unit sets these; the code enforces them regardless of the env claim.
+LLM_CALL_LIMIT = int(os.environ.get("EVOLUTION_MAX_LLM_CALLS", "2") or 0)
+REPORT_ONLY = os.environ.get("ALMAZ_EVOLUTION_REPORT_ONLY", "1") == "1"
+_llm_calls = 0
+
+
+def write_last_run(mode, accepted=None, rejected=None, note=""):
+    """Handoff for the daily digest: one JSON for machines, one line for humans."""
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "mode": mode,
+        "workspace": str(WORKSPACE_DIR),
+        "llm_calls": _llm_calls,
+        "llm_call_limit": LLM_CALL_LIMIT,
+        "report_only": REPORT_ONLY,
+        "auto_promote": (os.environ.get("BELYA_AUTO_PROMOTE", "0") == "1") and not REPORT_ONLY,
+        "accepted": accepted,
+        "rejected": rejected,
+        "note": note,
+    }
+    try:
+        REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        (REPORTS_DIR / "last_run.json").write_text(json.dumps(payload, indent=2))
+        line = (
+            f"{payload['timestamp'][:19]}Z | mode={mode} | llm_calls={_llm_calls}/{LLM_CALL_LIMIT}"
+            f" | accepted={accepted if accepted is not None else '-'}"
+            f" rejected={rejected if rejected is not None else '-'}"
+            f" | promote={'off' if REPORT_ONLY else 'on'}"
+        )
+        if note:
+            line += f" | {note}"
+        (REPORTS_DIR / "last_run.txt").write_text(line + "\n")
+    except Exception as e:
+        print(f"[!] could not write last_run: {e}")
+
 POSIX_FLAGS = [
     "-D_POSIX_C_SOURCE=200809L",
     "-D_DEFAULT_SOURCE",
@@ -362,6 +399,11 @@ def generate_dynamic_llm_mutation(history, env):
     when static pool mutations are exhausted.
     Strictly constrained to whitelist files, single hunk, JSON schema, and novelty gate.
     """
+    global _llm_calls
+    if _llm_calls >= LLM_CALL_LIMIT:
+        print(f"[!] LLM call cap reached ({_llm_calls}/{LLM_CALL_LIMIT}); skipping dynamic generation.")
+        return None
+    _llm_calls += 1
     print("[*] Generating dynamic LLM mutation candidate...")
     api_key = env.get("MODEL_API_KEY") or env.get("OPENROUTER_API_KEY") or env.get("OPENCODE_API_KEY")
     endpoint = env.get("MODEL_ENDPOINT") or "https://opencode.ai/zen/go/v1/chat/completions"
@@ -1162,6 +1204,7 @@ def main():
 
     findings = run_project_audit()
     if args.audit_only:
+        write_last_run("audit-only", note="audit only; no evolution attempted")
         print("[+] Audit-only run complete.\n")
         return
 
@@ -1180,6 +1223,7 @@ def main():
                     status = f"GATED OUT ({reason})"
             print(f"  • {m['id']} [{m['target_file']}]: {status}")
         print("\n[+] Dry-run pool inspection complete.\n")
+        write_last_run("dry-run", note="pool inspection only; nothing sandboxed")
         return
 
     evo_result = run_self_evolution(force_retest=args.force_retest)
@@ -1188,8 +1232,9 @@ def main():
     healing_status = run_self_healing_analysis()
     update_self_model_from_evolution(evo_result, arena_result)
     dispatch_daily_report(findings, evo_result, arena_result, healing_status, env)
-    # Week-6 opt-in end-to-end loop: ONLY when explicitly enabled.
-    if os.environ.get("BELYA_AUTO_PROMOTE") == "1":
+    # Week-6 opt-in end-to-end loop: ONLY when explicitly enabled, and never while
+    # the scheduled run is report-only (P1). Two independent keys must turn.
+    if os.environ.get("BELYA_AUTO_PROMOTE") == "1" and not REPORT_ONLY:
         print("[+] BELYA_AUTO_PROMOTE=1: running auto-promote hook...")
         try:
             promote_bin = "/usr/local/libexec/almaz/auto_promote.sh"
@@ -1198,6 +1243,11 @@ def main():
             subprocess.run([promote_bin], timeout=1500)
         except Exception as e:
             print(f"[!] auto_promote hook failed: {e}")
+    elif os.environ.get("BELYA_AUTO_PROMOTE") == "1":
+        print("[!] BELYA_AUTO_PROMOTE=1 refused: report-only mode (P1).")
+    acc = evo_result.get("accepted") if isinstance(evo_result, dict) else None
+    rej = evo_result.get("rejected") if isinstance(evo_result, dict) else None
+    write_last_run("daily", accepted=acc, rejected=rej)
     print("[+] All 5 Daily Mission Phases Completed Successfully.\n")
 
 if __name__ == "__main__":

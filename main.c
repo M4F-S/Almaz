@@ -273,6 +273,21 @@ static void load_env_file(const char *path) {
     fclose(fp);
 }
 
+/* T0.3: how many goals sit in a given status. Used by --cycle to prove, from the
+   outside, that the cycle actually moved the queue. */
+static int goal_status_count(BelyaAgent *agent, const char *status) {
+    if (!agent || !agent->db) return -1;
+    char q[128];
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='%s';", status);
+    sqlite3_stmt *st = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(agent->db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     atexit(cleanup_terminal);
     struct sigaction sa;
@@ -294,6 +309,9 @@ int main(int argc, char **argv) {
     const char *resume_session_id = NULL;
     const char *headless_prompt = NULL;
     bool no_probe = false;
+    bool cycle_mode = false;   /* T0.3: run one autonomic cycle and exit */
+    bool digest_mode = false;  /* T0.5: render the daily scorecard and exit */
+    int digest_hours = 24;
 
     bool stage_mode = false;
     const char *preset_name = NULL;
@@ -320,7 +338,10 @@ int main(int argc, char **argv) {
             printf("  --export-skills            Export RFC 8615 skills discovery catalogue to .well-known/agent-skills/ and exit\n");
             printf("  --export-sharegpt <file>   Export trajectory in ShareGPT / Hermes format and exit\n");
             printf("  --export-dpo <file>        Export trajectory in Hermes DPO preference format and exit\n");
-            printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n\n");
+            printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n");
+            printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n");
+            printf("  --digest                   Print the daily autonomy scorecard, record it, and send it\n");
+            printf("  --digest-hours <n>         Window for --digest in hours (default 24)\n\n");
             return 0;
         } else if (strcmp(argv[i], "--presets") == 0) {
             model_presets_print_list();
@@ -365,6 +386,17 @@ int main(int argc, char **argv) {
             headless_prompt = argv[++i];
         } else if (strcmp(argv[i], "--selfest") == 0) {
             return run_selfest();
+        } else if (strcmp(argv[i], "--cycle") == 0) {
+            /* T0.3: clock-triggered autonomy — no chat idleness, no model call. */
+            cycle_mode = true;
+            no_probe = true;
+        } else if (strcmp(argv[i], "--digest") == 0) {
+            /* T0.5: scorecard is deterministic — no model call needed. */
+            digest_mode = true;
+            no_probe = true;
+        } else if (strcmp(argv[i], "--digest-hours") == 0 && i + 1 < argc) {
+            int h = atoi(argv[++i]);
+            if (h > 0 && h <= 720) digest_hours = h;
         } else if (argv[i][0] != '-' && !headless_prompt) {
             headless_prompt = argv[i];
         }
@@ -476,6 +508,66 @@ int main(int argc, char **argv) {
     }
     if (stage_mode) {
         harness->stage_mode = true;
+    }
+
+    if (digest_mode) {
+        /* T0.5: the scorecard is a report, never a decision — so it is recorded and
+           delivered even if Telegram is unreachable, and its exit code reflects the
+           report, not the delivery. */
+        AlmazDigest d;
+        if (!almaz_digest_collect(agent, digest_hours, &d)) {
+            fprintf(stderr, "[digest] failed to collect scorecard\n");
+            belya_harness_free(harness);
+            model_gateway_free(gateway);
+            return 1;
+        }
+        char *text = almaz_digest_render(&d);
+        printf("%s", text ? text : "");
+        if (text) {
+            belya_agent_log_timeline(agent, "daily_digest", text);
+            if (tg_token && tg_chat_id && tg_token[0] && tg_chat_id[0]) {
+                TelegramBot *bot = telegram_bot_init(tg_token, tg_chat_id);
+                if (bot) {
+                    bool sent = telegram_bot_send_chunks(bot, tg_chat_id, text);
+                    printf("[digest] telegram=%s\n", sent ? "sent" : "failed");
+                    telegram_bot_free(bot);
+                } else {
+                    printf("[digest] telegram=init_failed\n");
+                }
+            } else {
+                printf("[digest] telegram=not_configured\n");
+            }
+            free(text);
+        }
+        belya_harness_free(harness);
+        model_gateway_free(gateway);
+        return 0;
+    }
+
+    if (cycle_mode) {
+        /* T0.3: one autonomic cycle, driven by the clock instead of 30 minutes of
+           chat idleness. Kill-switch aware; exit code is the cycle's own verdict. */
+        if (!almaz_autonomy_enabled()) {
+            printf("[cycle] ALMAZ_AUTONOMY is off — no cycle run.\n");
+            belya_harness_free(harness);
+            model_gateway_free(gateway);
+            return 0;
+        }
+        int before_pending = goal_status_count(agent, "pending");
+        int before_blocked = goal_status_count(agent, "blocked");
+        char *alert = NULL;
+        bool ran = almaz_autonomic_cognition_cycle(harness, &alert);
+        int after_pending = goal_status_count(agent, "pending");
+        int after_blocked = goal_status_count(agent, "blocked");
+        printf("[cycle] ran=%d pending %d->%d blocked %d->%d\n",
+               (int)ran, before_pending, after_pending, before_blocked, after_blocked);
+        if (alert) {
+            printf("[cycle] critical alert: %s\n", alert);
+            free(alert);
+        }
+        belya_harness_free(harness);
+        model_gateway_free(gateway);
+        return ran ? 0 : 1;
     }
 
     if (telegram_mode) {

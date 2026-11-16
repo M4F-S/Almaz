@@ -212,6 +212,46 @@ bool almaz_should_retrieve_memory(const char *user_input);
 
 // Autonomic Subconscious Idle Loop & Intrinsic Goal Engine
 bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert);
+/* P0 kill switch (FR-13): ALMAZ_AUTONOMY=off|0|false|no disables every autonomous
+   cycle regardless of who triggers it (timer, idle loop or /cycle). Unset = enabled. */
+bool almaz_autonomy_enabled(void);
+/* T0.4 per-cycle work caps and spend reserve (FR-12). Defaults: 5 goals, 120 s,
+   5000-token reserve; env overrides ALMAZ_CYCLE_MAX_GOALS / _MAX_SECONDS /
+   _TOKEN_RESERVE, with out-of-range values ignored rather than trusted. */
+typedef struct {
+    int max_goals;
+    int max_seconds;
+    long token_reserve;
+} AlmazCycleLimits;
+AlmazCycleLimits almaz_cycle_limits_from_env(void);
+/* True when the daily budget allows another cycle; out_remaining gets the tokens
+   left today (-1 when no token cap is configured). */
+bool almaz_cycle_budget_ok(BelyaAgent *agent, const AlmazCycleLimits *lim, long *out_remaining);
+/* T0.5 daily scorecard: what the organism did on its own, as numbers — cycles,
+   goal outcomes in the window, current queue, spend against the cap, and the
+   reasons anything is blocked. Deterministic; no model call, no network. */
+typedef struct {
+    int cycles;
+    int goal_actions;
+    int anomalies;
+    int budget_stops;
+    int time_stops;
+    int goals_completed;
+    int goals_pending;
+    int goals_blocked;
+    int completed_window;
+    long tokens_used;
+    long tokens_cap;
+    long calls;
+    double rss_mb;
+    long db_bytes;
+    char top_blocked[192];
+    char evolution[256];   /* one-line handoff from the evolution supervisor, if any */
+} AlmazDigest;
+
+bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out);
+/* Caller owns the returned string. */
+char *almaz_digest_render(const AlmazDigest *d);
 void almaz_goals_generate_deterministic(BelyaHarness *h);
 bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);

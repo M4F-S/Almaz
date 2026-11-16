@@ -8173,23 +8173,41 @@ static void canonical_goal_name(const char *raw, char *out, size_t n) {
     snprintf(out, n, "%s", p);
 }
 
+/* P0: bound on how many times the dispatcher will retry one goal, and the
+   minimum spacing between attempts. A goal that ran a handler but did not
+   resolve is retried; one with no handler at all is blocked immediately. */
+#define ALMAZ_GOAL_MAX_ATTEMPTS 3
+#define ALMAZ_GOAL_RETRY_MINUTES 10
+
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     if (!h || !h->agent || !h->agent->db) return false;
     sqlite3 *db = h->agent->db;
 
     sqlite3_stmt *stmt = NULL;
-    const char *sel_q = "SELECT id, goal, category, priority FROM agent_goals WHERE status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1;";
+    /* P0: a goal is skipped once it has burned its attempts or is inside its retry
+       window. Without this, a priority-80 goal no handler can satisfy re-won
+       `ORDER BY priority DESC` on every cycle and starved every goal below it. */
+    char sel_q[512];
+    snprintf(sel_q, sizeof(sel_q),
+             "SELECT id, goal, category, priority, COALESCE(attempts,0) FROM agent_goals "
+             "WHERE status = 'pending' AND COALESCE(attempts,0) < %d "
+             "AND (last_attempt_at IS NULL OR last_attempt_at < datetime('now','-%d minutes')) "
+             "ORDER BY priority DESC, id ASC LIMIT 1;",
+             ALMAZ_GOAL_MAX_ATTEMPTS, ALMAZ_GOAL_RETRY_MINUTES);
     if (sqlite3_prepare_v2(db, sel_q, -1, &stmt, NULL) != SQLITE_OK) return false;
 
     int goal_id = -1;
+    int attempts = 0;
     char goal_name[128] = {0};
     char category[64] = {0};
     bool resolved = false;   /* H6: remediation outcome, visible at update gate */
+    bool ran_handler = false; /* P0: did an actual handler execute for this goal? */
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         goal_id = sqlite3_column_int(stmt, 0);
         const char *g = (const char *)sqlite3_column_text(stmt, 1);
         const char *c = (const char *)sqlite3_column_text(stmt, 2);
+        attempts = sqlite3_column_int(stmt, 4);
         /* H7: canonicalise before the strcmp cascade (see canonical_goal_name). */
         if (g) canonical_goal_name(g, goal_name, sizeof(goal_name));
         if (c) snprintf(category, sizeof(category), "%s", c);
@@ -8254,6 +8272,9 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
                                  "Timeline anomaly goal acknowledged by the remediation dispatcher.");
         dyn_str_append(&res_ds, "Timeline anomaly acknowledged (already recorded in agent_timeline). "
                                 "No automated remediation is defined for this class; nothing was changed.");
+        /* P0: acknowledging IS this goal's remediation — without this it stayed
+           pending forever and re-won the queue on every cycle. */
+        resolved = true;
     } else if (strcmp(category, "HEALTH_REMEDIATION") == 0 || strcmp(category, "ANOMALY_REMEDIATION") == 0) {
         /* H6: deterministic remediation runbooks — no more fake "completed".
            Each known goal gets a real, bounded, non-destructive action;
@@ -8301,31 +8322,86 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
             handled = false;
         }
         if (!handled) {
-            dyn_str_appendf(&res_ds, "Unrecognised remediation goal '%s' — left pending, operator alert raised.", goal_name);
+            dyn_str_appendf(&res_ds, "Unrecognised remediation goal '%s' — no runbook for it in this build.", goal_name);
         }
+        ran_handler = handled;
     } else {
-        dyn_str_appendf(&res_ds, "Custom goal '%s' completed.", goal_name);
+        /* P0: never claim completion for a goal this build cannot handle. */
+        dyn_str_appendf(&res_ds, "No handler for goal '%s' (category %s) in this build.", goal_name, category);
     }
 
-    // Update goal row — only when actually resolved/actioned (H6: never
-    // auto-complete an unresolved remediation goal)
+    /* P0: which goals this build can genuinely act on. The deterministic
+       maintenance names above each have a real handler; the anomaly branch is an
+       acknowledgement; anything that reached the final else has none. */
+    if (strcmp(goal_name, "prune_timeline") == 0 ||
+        strcmp(goal_name, "refresh_self_model") == 0 ||
+        strcmp(goal_name, "verify_workspace_integrity") == 0 ||
+        strcmp(goal_name, "distill_failure_wisdom") == 0 ||
+        strcmp(goal_name, "fademem_prune_sweep") == 0 ||
+        strcmp(goal_name, "concept_fusion_sweep") == 0 ||
+        strcmp(goal_name, "timeline_anomaly") == 0) {
+        ran_handler = true;
+    }
+
+    /* P0 outcome bookkeeping. A goal is 'completed' only when a handler actually
+       ran and (for remediations) resolved. A goal with no handler in this build is
+       'blocked' immediately — retrying it can only waste cycles and starve the
+       queue. A remediation that ran but did not resolve is retried, and blocked
+       once it has burned ALMAZ_GOAL_MAX_ATTEMPTS. */
+    bool is_remediation = (strcmp(category, "HEALTH_REMEDIATION") == 0 ||
+                           strcmp(category, "ANOMALY_REMEDIATION") == 0);
+    const char *new_status;
+    const char *blocked_reason = NULL;
+    char reason_buf[320];
+
+    if (!ran_handler) {
+        new_status = "blocked";
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "no handler for goal '%s' (category %s) in this build", goal_name, category);
+        blocked_reason = reason_buf;
+    } else if (!is_remediation || resolved) {
+        new_status = "completed";
+    } else if (attempts + 1 >= ALMAZ_GOAL_MAX_ATTEMPTS) {
+        new_status = "blocked";
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "remediation did not resolve after %d attempts", attempts + 1);
+        blocked_reason = reason_buf;
+    } else {
+        new_status = "pending";
+    }
+
     sqlite3_stmt *up_stmt = NULL;
-    const char *up_q = "UPDATE agent_goals SET status = 'completed', result_summary = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?;";
-    if (strcmp(category, "HEALTH_REMEDIATION") != 0 && strcmp(category, "ANOMALY_REMEDIATION") != 0) {
-        if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
+    const char *up_q;
+    if (strcmp(new_status, "completed") == 0) {
+        up_q = "UPDATE agent_goals SET status='completed', result_summary=?, "
+               "completed_at=CURRENT_TIMESTAMP, attempts=COALESCE(attempts,0)+1, "
+               "last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    } else if (strcmp(new_status, "blocked") == 0) {
+        up_q = "UPDATE agent_goals SET status='blocked', result_summary=?, blocked_reason=?, "
+               "attempts=COALESCE(attempts,0)+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    } else {
+        up_q = "UPDATE agent_goals SET status='pending', result_summary=?, "
+               "attempts=COALESCE(attempts,0)+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    }
+    if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
+        if (strcmp(new_status, "blocked") == 0) {
+            sqlite3_bind_text(up_stmt, 2, blocked_reason ? blocked_reason : "unknown", -1, SQLITE_STATIC);
+            sqlite3_bind_int(up_stmt, 3, goal_id);
+        } else {
             sqlite3_bind_int(up_stmt, 2, goal_id);
-            sqlite3_step(up_stmt);
-            sqlite3_finalize(up_stmt);
         }
-    } else if (resolved) {
-        /* Remediation resolved: mark completed. */
-        if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
-            sqlite3_bind_int(up_stmt, 2, goal_id);
-            sqlite3_step(up_stmt);
-            sqlite3_finalize(up_stmt);
-        }
+        sqlite3_step(up_stmt);
+        sqlite3_finalize(up_stmt);
+    }
+
+    /* Every outcome is auditable from the timeline, not just from the row. */
+    {
+        char tl[384];
+        snprintf(tl, sizeof(tl), "goal %d '%s' -> %s (attempt %d): %.180s",
+                 goal_id, goal_name, new_status, attempts + 1,
+                 res_ds.data ? res_ds.data : "");
+        belya_agent_log_timeline(h->agent, "goal_outcome", tl);
     }
 
     if (out_result_summary) {
@@ -8335,20 +8411,223 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     return true;
 }
 
+/* ---- T0.5 daily scorecard -------------------------------------------------- */
+
+static int digest_scalar(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *st = NULL;
+    int v = 0;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) v = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    return v;
+}
+
+bool almaz_digest_collect(BelyaAgent *agent, int hours, AlmazDigest *out) {
+    if (!agent || !agent->db || !out) return false;
+    memset(out, 0, sizeof(*out));
+    if (hours <= 0) hours = 24;
+    sqlite3 *db = agent->db;
+    char q[512];
+
+    /* Window activity, straight from the timeline (the audit trail, not a guess). */
+    snprintf(q, sizeof(q),
+        "SELECT "
+        " SUM(event_type='autonomic_cycle'),"
+        " SUM(event_type='goal_outcome'),"
+        " SUM(event_type='anomaly_acknowledged'),"
+        " SUM(event_type='cycle_budget_stop'),"
+        " SUM(event_type='cycle_time_stop')"
+        " FROM agent_timeline WHERE created_at >= datetime('now','-%d hours');", hours);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            out->cycles         = sqlite3_column_int(st, 0);
+            out->goal_actions   = sqlite3_column_int(st, 1);
+            out->anomalies      = sqlite3_column_int(st, 2);
+            out->budget_stops   = sqlite3_column_int(st, 3);
+            out->time_stops     = sqlite3_column_int(st, 4);
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Current queue shape. */
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='completed';");
+    out->goals_completed = digest_scalar(db, q);
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='pending';");
+    out->goals_pending = digest_scalar(db, q);
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='blocked';");
+    out->goals_blocked = digest_scalar(db, q);
+
+    /* Completed inside the window — the number that answers "did it work today". */
+    snprintf(q, sizeof(q),
+        "SELECT COUNT(*) FROM agent_goals WHERE completed_at >= datetime('now','-%d hours');", hours);
+    out->completed_window = digest_scalar(db, q);
+
+    /* Most frequent blocking reason, so the digest says WHY, not just how many. */
+    snprintf(q, sizeof(q),
+        "SELECT COALESCE(blocked_reason,'') FROM agent_goals WHERE status='blocked' "
+        "AND COALESCE(blocked_reason,'')<>'' GROUP BY blocked_reason ORDER BY COUNT(*) DESC LIMIT 1;");
+    st = NULL;
+    if (sqlite3_prepare_v2(db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char *r = (const char *)sqlite3_column_text(st, 0);
+            if (r) snprintf(out->top_blocked, sizeof(out->top_blocked), "%s", r);
+        }
+        sqlite3_finalize(st);
+    }
+
+    /* Spend, from the same accounting the governor uses. */
+    if (agent->gateway) {
+        ModelGateway *gw = agent->gateway;
+        out->tokens_cap = gw->budget_limits.daily_tokens;
+        if (budget_state_day_is_today(&gw->budget_state)) {
+            out->tokens_used = gw->budget_state.tokens_used;
+            out->calls = gw->budget_state.calls;
+        }
+    }
+
+    out->rss_mb = belya_get_current_rss_mb();
+
+    struct stat sb;
+    if (agent->db_path[0] && stat(agent->db_path, &sb) == 0) {
+        out->db_bytes = (long)sb.st_size;
+    }
+
+    /* Evolution handoff (P1): the supervisor writes one line per run. If it is
+       missing the digest says so rather than pretending evolution ran. */
+    const char *evo_path = getenv("ALMAZ_EVOLUTION_STATUS");
+    if (!evo_path || !evo_path[0]) evo_path = "/opt/almaz-evo/reports/last_run.txt";
+    FILE *ef = fopen(evo_path, "r");
+    if (ef) {
+        if (fgets(out->evolution, sizeof(out->evolution), ef)) {
+            size_t n = strlen(out->evolution);
+            while (n > 0 && (out->evolution[n - 1] == '\n' || out->evolution[n - 1] == '\r')) {
+                out->evolution[--n] = '\0';
+            }
+        }
+        fclose(ef);
+    }
+    return true;
+}
+
+char *almaz_digest_render(const AlmazDigest *d) {
+    if (!d) return NULL;
+    DynString out = dyn_str_new();
+    dyn_str_append(&out, "Almaz daily scorecard (last 24h)\n");
+    dyn_str_appendf(&out, "Autonomy: %d cycle(s), %d goal action(s), %d anomaly-ish event(s)\n",
+                    d->cycles, d->goal_actions, d->anomalies);
+    dyn_str_appendf(&out, "Goals done in window: %d | queue: %d completed, %d pending, %d blocked\n",
+                    d->completed_window, d->goals_completed, d->goals_pending, d->goals_blocked);
+    if (d->tokens_cap > 0) {
+        if (d->tokens_used == 0 && d->calls > 0) {
+            /* Calls were attempted but none reported usage. Saying "0 tokens" alone
+               hides that: it looks like a quiet day, not like failing calls. */
+            dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s) — none reported usage\n",
+                            d->tokens_used, d->tokens_cap, d->calls);
+        } else {
+            dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s)\n",
+                            d->tokens_used, d->tokens_cap, d->calls);
+        }
+    } else {
+        dyn_str_appendf(&out, "Spend today: %ld tokens, %ld call(s) (no daily cap set)\n",
+                        d->tokens_used, d->calls);
+    }
+    dyn_str_appendf(&out, "Governor stops: %d budget, %d wall-clock\n",
+                    d->budget_stops, d->time_stops);
+    if (d->top_blocked[0]) {
+        dyn_str_appendf(&out, "Top block reason: %.150s\n", d->top_blocked);
+    } else if (d->goals_blocked == 0) {
+        dyn_str_append(&out, "Top block reason: none\n");
+    }
+    dyn_str_appendf(&out, "Process: RSS %.2fMB | DB %.1fMB\n",
+                    d->rss_mb, (double)d->db_bytes / (1024.0 * 1024.0));
+    if (d->evolution[0]) {
+        dyn_str_appendf(&out, "Evolution: %.190s\n", d->evolution);
+    } else {
+        dyn_str_append(&out, "Evolution: no scheduled run recorded\n");
+    }
+    return out.data ? out.data : xstrdup("Almaz daily scorecard: no data\n");
+}
+
+/* ---- Autonomic cycle ------------------------------------------------------- */
+
+bool almaz_autonomy_enabled(void) {
+    const char *v = getenv("ALMAZ_AUTONOMY");
+    if (!v || !v[0]) return true;              /* unset = enabled */
+    if (strcmp(v, "0") == 0) return false;
+    if (strcasecmp(v, "off") == 0) return false;
+    if (strcasecmp(v, "false") == 0) return false;
+    if (strcasecmp(v, "no") == 0) return false;
+    return true;
+}
+
+AlmazCycleLimits almaz_cycle_limits_from_env(void) {
+    AlmazCycleLimits l = { 5, 120, 5000 };
+    const char *g = getenv("ALMAZ_CYCLE_MAX_GOALS");
+    const char *s = getenv("ALMAZ_CYCLE_MAX_SECONDS");
+    const char *r = getenv("ALMAZ_CYCLE_TOKEN_RESERVE");
+    if (g) { int v = atoi(g); if (v > 0 && v <= 50) l.max_goals = v; }
+    if (s) { int v = atoi(s); if (v > 0 && v <= 3600) l.max_seconds = v; }
+    if (r) { long v = atol(r); if (v >= 0) l.token_reserve = v; }
+    return l;
+}
+
+bool almaz_cycle_budget_ok(BelyaAgent *agent, const AlmazCycleLimits *lim, long *out_remaining) {
+    if (out_remaining) *out_remaining = -1;
+    if (!lim) return false;
+    /* No gateway means no spend path at all. */
+    if (!agent || !agent->gateway) return true;
+    ModelGateway *gw = agent->gateway;
+
+    if (gw->budget_tripped && budget_state_day_is_today(&gw->budget_state)) return false;
+
+    long cap = gw->budget_limits.daily_tokens;   /* 0 = disabled */
+    if (cap <= 0) {
+        if (out_remaining) *out_remaining = -1;
+        return true;
+    }
+    long used = budget_state_day_is_today(&gw->budget_state) ? gw->budget_state.tokens_used : 0;
+    long remaining = cap - used;
+    if (out_remaining) *out_remaining = remaining;
+    return remaining >= lim->token_reserve;
+}
+
 bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert) {
     if (!harness || !harness->agent) return false;
 
-    // 1. Deterministically generate pending goals based on current telemetry
-    almaz_goals_generate_deterministic(harness);
-
-    // 2. Drain a bounded batch of pending goals (H7/H10). The queue only drains here,
-    //    so processing a single goal per ~2h cycle left remediations pending for days.
+    // 1. Spend governor first (T0.4): a refused cycle must be a strict no-op, so it
+    //    neither generates bookkeeping goals nor drains the queue. Refusal is a
+    //    normal outcome (exit 0), not a failure.
+    AlmazCycleLimits lim = almaz_cycle_limits_from_env();
+    long remaining_tokens = -1;
+    bool budget_ok = almaz_cycle_budget_ok(harness->agent, &lim, &remaining_tokens);
+    int processed = 0;
     char *goal_summary = NULL;
-    for (int gi = 0; gi < 5; gi++) {
-        char *one = NULL;
-        if (!almaz_goals_process_next(harness, &one)) break;
-        free(goal_summary);
-        goal_summary = one;   /* keep the last summary for the log line below */
+
+    if (!budget_ok) {
+        belya_agent_log_timeline(harness->agent, "cycle_budget_stop",
+                                 "Autonomic cycle skipped: daily budget is sealed or below the cycle token reserve. Nothing was generated or processed.");
+    } else {
+        // 2a. Deterministically generate pending goals based on current telemetry
+        almaz_goals_generate_deterministic(harness);
+    }
+
+    // 2b. Drain a bounded batch: capped by goal count and wall clock.
+    if (budget_ok) {
+        time_t deadline = time(NULL) + (time_t)lim.max_seconds;
+        for (int gi = 0; gi < lim.max_goals; gi++) {
+            if (time(NULL) > deadline) {
+                belya_agent_log_timeline(harness->agent, "cycle_time_stop",
+                                         "Autonomic cycle hit its wall-clock cap; remaining goals stay pending.");
+                break;
+            }
+            char *one = NULL;
+            if (!almaz_goals_process_next(harness, &one)) break;
+            processed++;
+            free(goal_summary);
+            goal_summary = one;   /* keep the last summary for the log line below */
+        }
     }
 
     // 3. Sync self-model
@@ -8356,10 +8635,18 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
 
     // 4. Log autonomic cycle to timeline
     char log_buf[512];
-    snprintf(log_buf, sizeof(log_buf),
-             "Autonomic subconscious cycle executed: %s (Turn: %zu, RSS: %.2fMB)",
-             goal_summary ? goal_summary : "nominally complete",
-             harness->agent->turn_count, belya_get_current_rss_mb());
+    if (!budget_ok) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Autonomic cycle skipped by spend governor (daily cap %ld, remaining %ld, reserve %ld; Turn: %zu, RSS: %.2fMB)",
+                 (harness->agent->gateway ? harness->agent->gateway->budget_limits.daily_tokens : 0L),
+                 remaining_tokens, lim.token_reserve,
+                 harness->agent->turn_count, belya_get_current_rss_mb());
+    } else {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Autonomic cycle: %d goal(s) processed — %.200s (Turn: %zu, RSS: %.2fMB)",
+                 processed, goal_summary ? goal_summary : "no pending goals",
+                 harness->agent->turn_count, belya_get_current_rss_mb());
+    }
     belya_agent_log_timeline(harness->agent, "autonomic_cycle", log_buf);
     free(goal_summary);   /* the dispatcher hands ownership of the summary to the caller */
     goal_summary = NULL;

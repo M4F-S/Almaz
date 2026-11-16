@@ -300,6 +300,11 @@ BelyaAgent *belya_agent_init(ModelGateway *gw, const char *db_path, const char *
             "ALTER TABLE agent_memory ADD COLUMN salience REAL DEFAULT 1.0;",
             "ALTER TABLE agent_memory ADD COLUMN access_count INTEGER DEFAULT 0;",
             "ALTER TABLE agent_memory ADD COLUMN last_accessed_at DATETIME DEFAULT CURRENT_TIMESTAMP;",
+            /* P0 goal-queue bookkeeping: attempts + retry window + escalation.
+               Additive and idempotent (a duplicate-column error is ignored). */
+            "ALTER TABLE agent_goals ADD COLUMN attempts INTEGER DEFAULT 0;",
+            "ALTER TABLE agent_goals ADD COLUMN last_attempt_at DATETIME;",
+            "ALTER TABLE agent_goals ADD COLUMN blocked_reason TEXT;",
             NULL
         };
         for (int mi = 0; migrations[mi]; mi++) {

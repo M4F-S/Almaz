@@ -2477,6 +2477,312 @@ static void test_autonomic_subconscious_and_goals(void) {
     printf("  -> Autonomic Subconscious & Intrinsic Goals PASSED\n");
 }
 
+static void test_goal_queue_progress(void) {
+    printf("[Test] Goal Queue: starvation guard & honest outcomes...\n");
+    ModelGateway *gw = model_gateway_init("http://127.0.0.1:1/v1/chat/completions", "none", "fake-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+    sqlite3_stmt *st = NULL;
+    char *summary = NULL;
+
+    /* 1. An unknown priority-80 remediation must not starve a lower-priority goal
+          this build CAN handle (priority 70 anomaly). Old behaviour: the unknown
+          goal was re-selected on every cycle and the anomaly never ran. */
+    assert(almaz_goals_add(agent->db, "quantum flux inversion in the token lattice",
+                           "HEALTH_REMEDIATION", 80, "test injection"));
+    assert(almaz_goals_add(agent->db, "Investigate timeline anomaly: token spike",
+                           "ANOMALY_REMEDIATION", 70, "test injection"));
+
+    assert(almaz_goals_process_next(h, &summary));
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, attempts, COALESCE(blocked_reason,'') FROM agent_goals "
+        "WHERE category='HEALTH_REMEDIATION';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "blocked") == 0);
+    assert(sqlite3_column_int(st, 1) == 1);
+    assert(strlen((const char *)sqlite3_column_text(st, 2)) > 0);
+    sqlite3_finalize(st);
+
+    /* 2. The anomaly is reachable and closes on acknowledgement. */
+    assert(almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "acknowledged") != NULL);
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, completed_at FROM agent_goals WHERE category='ANOMALY_REMEDIATION';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "completed") == 0);
+    assert(sqlite3_column_text(st, 1) != NULL);
+    sqlite3_finalize(st);
+
+    /* 3. Honest outcome: a goal with no handler is blocked, never "completed".
+          Old behaviour: "Custom goal '...' completed." with no action taken. */
+    assert(almaz_goals_add(agent->db, "custom_audit_without_handler", "CODE_AUDIT", 20, "no handler"));
+    assert(almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "No handler") != NULL);
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, completed_at, COALESCE(blocked_reason,'') FROM agent_goals "
+        "WHERE goal='custom_audit_without_handler';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "blocked") == 0);
+    assert(sqlite3_column_text(st, 1) == NULL);
+    assert(strlen((const char *)sqlite3_column_text(st, 2)) > 0);
+    sqlite3_finalize(st);
+
+    /* 4. Retry cap: a pending goal at the attempt ceiling is never selected. */
+    assert(almaz_goals_add(agent->db, "exhausted_goal", "MAINTENANCE", 10, "attempt ceiling"));
+    assert(sqlite3_exec(agent->db,
+        "UPDATE agent_goals SET attempts=3 WHERE goal='exhausted_goal';", 0, 0, 0) == SQLITE_OK);
+    assert(!almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "No pending intrinsic goals") != NULL);
+    free(summary);
+    summary = NULL;
+
+    /* 5. Every outcome is auditable from the timeline. */
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_timeline WHERE event_type='goal_outcome';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) >= 3);
+    sqlite3_finalize(st);
+
+    belya_harness_free(h);   /* frees the agent it was handed too */
+    model_gateway_free(gw);
+    printf("  -> Goal Queue Progress PASSED\n");
+}
+
+static void test_autonomy_kill_switch(void) {
+    printf("[Test] Autonomy kill switch (ALMAZ_AUTONOMY)...\n");
+    unsetenv("ALMAZ_AUTONOMY");
+    assert(almaz_autonomy_enabled());          /* unset = enabled */
+
+    setenv("ALMAZ_AUTONOMY", "1", 1);
+    assert(almaz_autonomy_enabled());
+
+    setenv("ALMAZ_AUTONOMY", "off", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "OFF", 1);        /* case-insensitive */
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "0", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "false", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "no", 1);
+    assert(!almaz_autonomy_enabled());
+
+    setenv("ALMAZ_AUTONOMY", "yes", 1);
+    assert(almaz_autonomy_enabled());
+
+    unsetenv("ALMAZ_AUTONOMY");
+    printf("  -> Autonomy Kill Switch PASSED\n");
+}
+
+static void test_cycle_budget_governor(void) {
+    printf("[Test] Cycle budget governor (T0.4 caps + spend reserve)...\n");
+    const char *ge = "ALMAZ_CYCLE_MAX_GOALS", *se = "ALMAZ_CYCLE_MAX_SECONDS", *re = "ALMAZ_CYCLE_TOKEN_RESERVE";
+    unsetenv(ge); unsetenv(se); unsetenv(re);
+
+    /* 1. Limits: sane defaults, valid overrides, out-of-range values refused. */
+    AlmazCycleLimits l = almaz_cycle_limits_from_env();
+    assert(l.max_goals == 5 && l.max_seconds == 120 && l.token_reserve == 5000);
+
+    setenv(ge, "2", 1); setenv(se, "7", 1); setenv(re, "0", 1);
+    l = almaz_cycle_limits_from_env();
+    assert(l.max_goals == 2 && l.max_seconds == 7 && l.token_reserve == 0);
+
+    setenv(ge, "0", 1);        /* invalid: keep default */
+    setenv(se, "99999", 1);    /* out of range: keep default */
+    setenv(re, "-5", 1);       /* negative: keep default */
+    l = almaz_cycle_limits_from_env();
+    assert(l.max_goals == 5 && l.max_seconds == 120 && l.token_reserve == 5000);
+    unsetenv(ge); unsetenv(se); unsetenv(re);
+
+    /* 2. Spend gate against the gateway's own daily budget accounting. */
+    ModelGateway *gw = model_gateway_init("http://127.0.0.1:1/v1/chat/completions", "none", "fake-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+    sqlite3_stmt *st = NULL;
+    long rem = -1;
+
+    budget_state_reset_day(&gw->budget_state);
+    gw->budget_tripped = false;
+    gw->budget_limits.daily_tokens = 1000;
+    gw->budget_state.tokens_used = 100;
+    l.max_goals = 5; l.max_seconds = 120;
+
+    l.token_reserve = 500;
+    assert(almaz_cycle_budget_ok(agent, &l, &rem) == true && rem == 900);
+    l.token_reserve = 5000;
+    assert(almaz_cycle_budget_ok(agent, &l, &rem) == false);      /* headroom < reserve */
+
+    gw->budget_state.sealed = 1;
+    gw->budget_tripped = true;
+    l.token_reserve = 0;
+    assert(almaz_cycle_budget_ok(agent, &l, &rem) == false);      /* sealed day */
+
+    gw->budget_tripped = false;
+    gw->budget_limits.daily_tokens = 0;                            /* cap disabled */
+    l.token_reserve = 999999;
+    assert(almaz_cycle_budget_ok(agent, &l, &rem) == true && rem == -1);
+
+    /* 3. The cycle drains at most ALMAZ_CYCLE_MAX_GOALS goals. */
+    assert(almaz_goals_add(agent->db, "verify_workspace_integrity", "CODE_AUDIT", 50, "cap test A"));
+    assert(almaz_goals_add(agent->db, "refresh_self_model", "MAINTENANCE", 40, "cap test B"));
+    setenv(ge, "1", 1);
+    assert(almaz_autonomic_cognition_cycle(h, NULL));
+    unsetenv(ge);
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_goals WHERE COALESCE(attempts,0) > 0;", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 1);   /* exactly one goal touched */
+    sqlite3_finalize(st);
+
+    /* 4. A sealed budget refuses the cycle outright: nothing generated, nothing
+          touched, queue length unchanged. */
+    gw->budget_limits.daily_tokens = 1000;
+    gw->budget_state.tokens_used = 1000;
+    gw->budget_state.sealed = 1;
+    gw->budget_tripped = true;
+    assert(almaz_goals_add(agent->db, "budget_gate_probe_goal", "MAINTENANCE", 10, "gate test"));
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_goals WHERE status='pending';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    int pending_before_refusal = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+
+    assert(almaz_autonomic_cognition_cycle(h, NULL));
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_goals WHERE status='pending';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == pending_before_refusal);   /* strict no-op */
+    sqlite3_finalize(st);
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COALESCE(attempts,0) FROM agent_goals WHERE goal='budget_gate_probe_goal';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) == 0);   /* untouched */
+    sqlite3_finalize(st);
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_timeline WHERE event_type='cycle_budget_stop';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) >= 1);
+    sqlite3_finalize(st);
+
+    belya_harness_free(h);   /* frees the agent it was handed too */
+    model_gateway_free(gw);
+    printf("  -> Cycle Budget Governor PASSED\n");
+}
+
+static void test_daily_digest(void) {
+    printf("[Test] Daily digest / scorecard (T0.5)...\n");
+    ModelGateway *gw = model_gateway_init("http://127.0.0.1:1/v1/chat/completions", "none", "fake-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+    assert(h != NULL);
+    char *s = NULL;
+
+    /* Two goals with real handlers -> completed. */
+    assert(almaz_goals_add(agent->db, "verify_workspace_integrity", "CODE_AUDIT", 50, "digest A"));
+    assert(almaz_goals_add(agent->db, "refresh_self_model", "MAINTENANCE", 40, "digest B"));
+    for (int i = 0; i < 2; i++) {
+        assert(almaz_goals_process_next(h, &s));
+        free(s);
+        s = NULL;
+    }
+
+    /* One goal with no handler -> blocked, with a reason. */
+    assert(almaz_goals_add(agent->db, "digest_unknown_work", "CODE_AUDIT", 30, "digest C"));
+    assert(almaz_goals_process_next(h, &s));
+    free(s);
+    s = NULL;
+
+    /* One parked goal at the attempt ceiling -> stays pending. */
+    assert(sqlite3_exec(agent->db,
+        "INSERT INTO agent_goals (goal,category,priority,status,rationale,attempts) "
+        "VALUES ('parked_goal','MAINTENANCE',1,'pending','digest D',3);", 0, 0, 0) == SQLITE_OK);
+
+    /* Timeline events the digest reports. */
+    belya_agent_log_timeline(agent, "autonomic_cycle", "digest test cycle");
+    belya_agent_log_timeline(agent, "cycle_budget_stop", "digest test budget stop");
+
+    /* Evolution handoff (P1): the supervisor's one-line status must reach the digest. */
+    const char *evo_tmp = "/tmp/almaz_evo_status_test.txt";
+    FILE *ef = fopen(evo_tmp, "w");
+    assert(ef != NULL);
+    fputs("2026-11-17T03:00:12Z | mode=daily | accepted=1 rejected=0 | promote=off\n", ef);
+    fclose(ef);
+    setenv("ALMAZ_EVOLUTION_STATUS", evo_tmp, 1);
+
+    AlmazDigest d;
+    assert(almaz_digest_collect(agent, 24, &d));
+    assert(d.goals_completed == 2);
+    assert(d.goals_blocked == 1);
+    assert(d.goals_pending == 1);
+    assert(d.completed_window == 2);
+    assert(d.cycles == 1);
+    assert(d.budget_stops == 1);
+    assert(strlen(d.top_blocked) > 0);
+    assert(d.rss_mb > 0.0);
+
+    char *text = almaz_digest_render(&d);
+    assert(text != NULL);
+    assert(strstr(text, "Almaz daily scorecard") != NULL);
+    assert(strstr(text, "Goals done in window: 2") != NULL);
+    assert(strstr(text, "2 completed, 1 pending, 1 blocked") != NULL);
+    assert(strstr(text, "Governor stops: 1 budget") != NULL);
+    assert(strstr(text, "Top block reason: no handler") != NULL);
+    assert(strstr(d.evolution, "mode=daily") != NULL);
+    assert(strstr(text, "Evolution: 2026-11-17T03:00:12Z") != NULL);
+    /* Missing handoff must say so, not silently omit the line. */
+    setenv("ALMAZ_EVOLUTION_STATUS", "/tmp/almaz_evo_status_missing.txt", 1);
+    AlmazDigest d2;
+    assert(almaz_digest_collect(agent, 24, &d2));
+    char *text2 = almaz_digest_render(&d2);
+    assert(text2 != NULL && strstr(text2, "Evolution: no scheduled run recorded") != NULL);
+    free(text2);
+
+    /* Calls that reported no usage must be named, not shown as a quiet zero spend. */
+    gw->budget_limits.daily_tokens = 5000000;
+    budget_state_reset_day(&gw->budget_state);
+    gw->budget_state.tokens_used = 0;
+    gw->budget_state.calls = 8;
+    AlmazDigest d3;
+    assert(almaz_digest_collect(agent, 24, &d3));
+    char *text3 = almaz_digest_render(&d3);
+    assert(text3 != NULL && strstr(text3, "none reported usage") != NULL);
+    assert(strstr(text3, "8 call(s)") != NULL);
+    free(text3);
+
+    gw->budget_state.tokens_used = 1234;   /* normal path must not carry the caveat */
+    AlmazDigest d4;
+    assert(almaz_digest_collect(agent, 24, &d4));
+    char *text4 = almaz_digest_render(&d4);
+    assert(text4 != NULL && strstr(text4, "none reported usage") == NULL);
+    assert(strstr(text4, "1234/5000000 tokens") != NULL);
+    free(text4);
+
+    unlink(evo_tmp);
+    unsetenv("ALMAZ_EVOLUTION_STATUS");
+    printf("%s", text);
+    free(text);
+
+    belya_harness_free(h);   /* frees the agent it was handed too */
+    model_gateway_free(gw);
+    printf("  -> Daily Digest PASSED\n");
+}
+
 static void test_health_watcher(void) {
     printf("--- Health Watcher ---\n");
 
@@ -4712,6 +5018,10 @@ int main(void) {
     test_recent_form_metric();
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
+    test_goal_queue_progress();
+    test_autonomy_kill_switch();
+    test_cycle_budget_governor();
+    test_daily_digest();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
@@ -4739,7 +5049,9 @@ int main(void) {
     test_sota_parity_pillars();
     test_superagent_harness_upgrade();
     test_sota_dominance_pillars();
-    printf("================ All Tests Passed Successfully (66/66 - 100%%) ================\n\n");
+    /* No hardcoded count: it drifted from reality (the label claimed 62/62 while
+       the suite held a different number). The per-test PASSED lines are the truth. */
+    printf("================ All Tests Passed Successfully ================\n\n");
     return 0;
 }
 
