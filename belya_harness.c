@@ -6743,8 +6743,15 @@ char *almaz_digest_render(const AlmazDigest *d) {
     dyn_str_appendf(&out, "Goals done in window: %d | queue: %d completed, %d pending, %d blocked\n",
                     d->completed_window, d->goals_completed, d->goals_pending, d->goals_blocked);
     if (d->tokens_cap > 0) {
-        dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s)\n",
-                        d->tokens_used, d->tokens_cap, d->calls);
+        if (d->tokens_used == 0 && d->calls > 0) {
+            /* Calls were attempted but none reported usage. Saying "0 tokens" alone
+               hides that: it looks like a quiet day, not like failing calls. */
+            dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s) — none reported usage\n",
+                            d->tokens_used, d->tokens_cap, d->calls);
+        } else {
+            dyn_str_appendf(&out, "Spend today: %ld/%ld tokens, %ld call(s)\n",
+                            d->tokens_used, d->tokens_cap, d->calls);
+        }
     } else {
         dyn_str_appendf(&out, "Spend today: %ld tokens, %ld call(s) (no daily cap set)\n",
                         d->tokens_used, d->calls);

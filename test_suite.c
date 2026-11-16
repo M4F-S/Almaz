@@ -2574,6 +2574,27 @@ static void test_daily_digest(void) {
     char *text2 = almaz_digest_render(&d2);
     assert(text2 != NULL && strstr(text2, "Evolution: no scheduled run recorded") != NULL);
     free(text2);
+
+    /* Calls that reported no usage must be named, not shown as a quiet zero spend. */
+    gw->budget_limits.daily_tokens = 5000000;
+    budget_state_reset_day(&gw->budget_state);
+    gw->budget_state.tokens_used = 0;
+    gw->budget_state.calls = 8;
+    AlmazDigest d3;
+    assert(almaz_digest_collect(agent, 24, &d3));
+    char *text3 = almaz_digest_render(&d3);
+    assert(text3 != NULL && strstr(text3, "none reported usage") != NULL);
+    assert(strstr(text3, "8 call(s)") != NULL);
+    free(text3);
+
+    gw->budget_state.tokens_used = 1234;   /* normal path must not carry the caveat */
+    AlmazDigest d4;
+    assert(almaz_digest_collect(agent, 24, &d4));
+    char *text4 = almaz_digest_render(&d4);
+    assert(text4 != NULL && strstr(text4, "none reported usage") == NULL);
+    assert(strstr(text4, "1234/5000000 tokens") != NULL);
+    free(text4);
+
     unlink(evo_tmp);
     unsetenv("ALMAZ_EVOLUTION_STATUS");
     printf("%s", text);
