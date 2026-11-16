@@ -6396,23 +6396,41 @@ static void canonical_goal_name(const char *raw, char *out, size_t n) {
     snprintf(out, n, "%s", p);
 }
 
+/* P0: bound on how many times the dispatcher will retry one goal, and the
+   minimum spacing between attempts. A goal that ran a handler but did not
+   resolve is retried; one with no handler at all is blocked immediately. */
+#define ALMAZ_GOAL_MAX_ATTEMPTS 3
+#define ALMAZ_GOAL_RETRY_MINUTES 10
+
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     if (!h || !h->agent || !h->agent->db) return false;
     sqlite3 *db = h->agent->db;
 
     sqlite3_stmt *stmt = NULL;
-    const char *sel_q = "SELECT id, goal, category, priority FROM agent_goals WHERE status = 'pending' ORDER BY priority DESC, id ASC LIMIT 1;";
+    /* P0: a goal is skipped once it has burned its attempts or is inside its retry
+       window. Without this, a priority-80 goal no handler can satisfy re-won
+       `ORDER BY priority DESC` on every cycle and starved every goal below it. */
+    char sel_q[512];
+    snprintf(sel_q, sizeof(sel_q),
+             "SELECT id, goal, category, priority, COALESCE(attempts,0) FROM agent_goals "
+             "WHERE status = 'pending' AND COALESCE(attempts,0) < %d "
+             "AND (last_attempt_at IS NULL OR last_attempt_at < datetime('now','-%d minutes')) "
+             "ORDER BY priority DESC, id ASC LIMIT 1;",
+             ALMAZ_GOAL_MAX_ATTEMPTS, ALMAZ_GOAL_RETRY_MINUTES);
     if (sqlite3_prepare_v2(db, sel_q, -1, &stmt, NULL) != SQLITE_OK) return false;
 
     int goal_id = -1;
+    int attempts = 0;
     char goal_name[128] = {0};
     char category[64] = {0};
     bool resolved = false;   /* H6: remediation outcome, visible at update gate */
+    bool ran_handler = false; /* P0: did an actual handler execute for this goal? */
 
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         goal_id = sqlite3_column_int(stmt, 0);
         const char *g = (const char *)sqlite3_column_text(stmt, 1);
         const char *c = (const char *)sqlite3_column_text(stmt, 2);
+        attempts = sqlite3_column_int(stmt, 4);
         /* H7: canonicalise before the strcmp cascade (see canonical_goal_name). */
         if (g) canonical_goal_name(g, goal_name, sizeof(goal_name));
         if (c) snprintf(category, sizeof(category), "%s", c);
@@ -6477,6 +6495,9 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
                                  "Timeline anomaly goal acknowledged by the remediation dispatcher.");
         dyn_str_append(&res_ds, "Timeline anomaly acknowledged (already recorded in agent_timeline). "
                                 "No automated remediation is defined for this class; nothing was changed.");
+        /* P0: acknowledging IS this goal's remediation — without this it stayed
+           pending forever and re-won the queue on every cycle. */
+        resolved = true;
     } else if (strcmp(category, "HEALTH_REMEDIATION") == 0 || strcmp(category, "ANOMALY_REMEDIATION") == 0) {
         /* H6: deterministic remediation runbooks — no more fake "completed".
            Each known goal gets a real, bounded, non-destructive action;
@@ -6524,31 +6545,86 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
             handled = false;
         }
         if (!handled) {
-            dyn_str_appendf(&res_ds, "Unrecognised remediation goal '%s' — left pending, operator alert raised.", goal_name);
+            dyn_str_appendf(&res_ds, "Unrecognised remediation goal '%s' — no runbook for it in this build.", goal_name);
         }
+        ran_handler = handled;
     } else {
-        dyn_str_appendf(&res_ds, "Custom goal '%s' completed.", goal_name);
+        /* P0: never claim completion for a goal this build cannot handle. */
+        dyn_str_appendf(&res_ds, "No handler for goal '%s' (category %s) in this build.", goal_name, category);
     }
 
-    // Update goal row — only when actually resolved/actioned (H6: never
-    // auto-complete an unresolved remediation goal)
+    /* P0: which goals this build can genuinely act on. The deterministic
+       maintenance names above each have a real handler; the anomaly branch is an
+       acknowledgement; anything that reached the final else has none. */
+    if (strcmp(goal_name, "prune_timeline") == 0 ||
+        strcmp(goal_name, "refresh_self_model") == 0 ||
+        strcmp(goal_name, "verify_workspace_integrity") == 0 ||
+        strcmp(goal_name, "distill_failure_wisdom") == 0 ||
+        strcmp(goal_name, "fademem_prune_sweep") == 0 ||
+        strcmp(goal_name, "concept_fusion_sweep") == 0 ||
+        strcmp(goal_name, "timeline_anomaly") == 0) {
+        ran_handler = true;
+    }
+
+    /* P0 outcome bookkeeping. A goal is 'completed' only when a handler actually
+       ran and (for remediations) resolved. A goal with no handler in this build is
+       'blocked' immediately — retrying it can only waste cycles and starve the
+       queue. A remediation that ran but did not resolve is retried, and blocked
+       once it has burned ALMAZ_GOAL_MAX_ATTEMPTS. */
+    bool is_remediation = (strcmp(category, "HEALTH_REMEDIATION") == 0 ||
+                           strcmp(category, "ANOMALY_REMEDIATION") == 0);
+    const char *new_status;
+    const char *blocked_reason = NULL;
+    char reason_buf[320];
+
+    if (!ran_handler) {
+        new_status = "blocked";
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "no handler for goal '%s' (category %s) in this build", goal_name, category);
+        blocked_reason = reason_buf;
+    } else if (!is_remediation || resolved) {
+        new_status = "completed";
+    } else if (attempts + 1 >= ALMAZ_GOAL_MAX_ATTEMPTS) {
+        new_status = "blocked";
+        snprintf(reason_buf, sizeof(reason_buf),
+                 "remediation did not resolve after %d attempts", attempts + 1);
+        blocked_reason = reason_buf;
+    } else {
+        new_status = "pending";
+    }
+
     sqlite3_stmt *up_stmt = NULL;
-    const char *up_q = "UPDATE agent_goals SET status = 'completed', result_summary = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?;";
-    if (strcmp(category, "HEALTH_REMEDIATION") != 0 && strcmp(category, "ANOMALY_REMEDIATION") != 0) {
-        if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
+    const char *up_q;
+    if (strcmp(new_status, "completed") == 0) {
+        up_q = "UPDATE agent_goals SET status='completed', result_summary=?, "
+               "completed_at=CURRENT_TIMESTAMP, attempts=COALESCE(attempts,0)+1, "
+               "last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    } else if (strcmp(new_status, "blocked") == 0) {
+        up_q = "UPDATE agent_goals SET status='blocked', result_summary=?, blocked_reason=?, "
+               "attempts=COALESCE(attempts,0)+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    } else {
+        up_q = "UPDATE agent_goals SET status='pending', result_summary=?, "
+               "attempts=COALESCE(attempts,0)+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?;";
+    }
+    if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
+        if (strcmp(new_status, "blocked") == 0) {
+            sqlite3_bind_text(up_stmt, 2, blocked_reason ? blocked_reason : "unknown", -1, SQLITE_STATIC);
+            sqlite3_bind_int(up_stmt, 3, goal_id);
+        } else {
             sqlite3_bind_int(up_stmt, 2, goal_id);
-            sqlite3_step(up_stmt);
-            sqlite3_finalize(up_stmt);
         }
-    } else if (resolved) {
-        /* Remediation resolved: mark completed. */
-        if (sqlite3_prepare_v2(db, up_q, -1, &up_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_text(up_stmt, 1, res_ds.data, -1, SQLITE_STATIC);
-            sqlite3_bind_int(up_stmt, 2, goal_id);
-            sqlite3_step(up_stmt);
-            sqlite3_finalize(up_stmt);
-        }
+        sqlite3_step(up_stmt);
+        sqlite3_finalize(up_stmt);
+    }
+
+    /* Every outcome is auditable from the timeline, not just from the row. */
+    {
+        char tl[384];
+        snprintf(tl, sizeof(tl), "goal %d '%s' -> %s (attempt %d): %.180s",
+                 goal_id, goal_name, new_status, attempts + 1,
+                 res_ds.data ? res_ds.data : "");
+        belya_agent_log_timeline(h->agent, "goal_outcome", tl);
     }
 
     if (out_result_summary) {

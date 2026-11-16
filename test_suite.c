@@ -2299,6 +2299,88 @@ static void test_autonomic_subconscious_and_goals(void) {
     printf("  -> Autonomic Subconscious & Intrinsic Goals PASSED\n");
 }
 
+static void test_goal_queue_progress(void) {
+    printf("[Test] Goal Queue: starvation guard & honest outcomes...\n");
+    ModelGateway *gw = model_gateway_init("http://127.0.0.1:1/v1/chat/completions", "none", "fake-model");
+    BelyaAgent *agent = belya_agent_init(gw, ":memory:", "Test System");
+    BelyaHarness *h = belya_harness_init(agent);
+    sqlite3_stmt *st = NULL;
+    char *summary = NULL;
+
+    /* 1. An unknown priority-80 remediation must not starve a lower-priority goal
+          this build CAN handle (priority 70 anomaly). Old behaviour: the unknown
+          goal was re-selected on every cycle and the anomaly never ran. */
+    assert(almaz_goals_add(agent->db, "quantum flux inversion in the token lattice",
+                           "HEALTH_REMEDIATION", 80, "test injection"));
+    assert(almaz_goals_add(agent->db, "Investigate timeline anomaly: token spike",
+                           "ANOMALY_REMEDIATION", 70, "test injection"));
+
+    assert(almaz_goals_process_next(h, &summary));
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, attempts, COALESCE(blocked_reason,'') FROM agent_goals "
+        "WHERE category='HEALTH_REMEDIATION';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "blocked") == 0);
+    assert(sqlite3_column_int(st, 1) == 1);
+    assert(strlen((const char *)sqlite3_column_text(st, 2)) > 0);
+    sqlite3_finalize(st);
+
+    /* 2. The anomaly is reachable and closes on acknowledgement. */
+    assert(almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "acknowledged") != NULL);
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, completed_at FROM agent_goals WHERE category='ANOMALY_REMEDIATION';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "completed") == 0);
+    assert(sqlite3_column_text(st, 1) != NULL);
+    sqlite3_finalize(st);
+
+    /* 3. Honest outcome: a goal with no handler is blocked, never "completed".
+          Old behaviour: "Custom goal '...' completed." with no action taken. */
+    assert(almaz_goals_add(agent->db, "custom_audit_without_handler", "CODE_AUDIT", 20, "no handler"));
+    assert(almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "No handler") != NULL);
+    free(summary);
+    summary = NULL;
+
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT status, completed_at, COALESCE(blocked_reason,'') FROM agent_goals "
+        "WHERE goal='custom_audit_without_handler';", -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(strcmp((const char *)sqlite3_column_text(st, 0), "blocked") == 0);
+    assert(sqlite3_column_text(st, 1) == NULL);
+    assert(strlen((const char *)sqlite3_column_text(st, 2)) > 0);
+    sqlite3_finalize(st);
+
+    /* 4. Retry cap: a pending goal at the attempt ceiling is never selected. */
+    assert(almaz_goals_add(agent->db, "exhausted_goal", "MAINTENANCE", 10, "attempt ceiling"));
+    assert(sqlite3_exec(agent->db,
+        "UPDATE agent_goals SET attempts=3 WHERE goal='exhausted_goal';", 0, 0, 0) == SQLITE_OK);
+    assert(!almaz_goals_process_next(h, &summary));
+    assert(summary != NULL && strstr(summary, "No pending intrinsic goals") != NULL);
+    free(summary);
+    summary = NULL;
+
+    /* 5. Every outcome is auditable from the timeline. */
+    assert(sqlite3_prepare_v2(agent->db,
+        "SELECT COUNT(*) FROM agent_timeline WHERE event_type='goal_outcome';",
+        -1, &st, NULL) == SQLITE_OK);
+    assert(sqlite3_step(st) == SQLITE_ROW);
+    assert(sqlite3_column_int(st, 0) >= 3);
+    sqlite3_finalize(st);
+
+    belya_harness_free(h);   /* frees the agent it was handed too */
+    model_gateway_free(gw);
+    printf("  -> Goal Queue Progress PASSED\n");
+}
+
 static void test_health_watcher(void) {
     printf("--- Health Watcher ---\n");
 
@@ -4120,6 +4202,7 @@ int main(void) {
     test_recent_form_metric();
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
+    test_goal_queue_progress();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
