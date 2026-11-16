@@ -59,7 +59,8 @@ def write_last_run(mode, accepted=None, rejected=None, note=""):
         (REPORTS_DIR / "last_run.json").write_text(json.dumps(payload, indent=2))
         line = (
             f"{payload['timestamp'][:19]}Z | mode={mode} | llm_calls={_llm_calls}/{LLM_CALL_LIMIT}"
-            f" | accepted={accepted} rejected={rejected}"
+            f" | accepted={accepted if accepted is not None else '-'}"
+            f" rejected={rejected if rejected is not None else '-'}"
             f" | promote={'off' if REPORT_ONLY else 'on'}"
         )
         if note:
