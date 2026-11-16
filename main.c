@@ -104,6 +104,21 @@ static void load_env_file(const char *path) {
     fclose(fp);
 }
 
+/* T0.3: how many goals sit in a given status. Used by --cycle to prove, from the
+   outside, that the cycle actually moved the queue. */
+static int goal_status_count(BelyaAgent *agent, const char *status) {
+    if (!agent || !agent->db) return -1;
+    char q[128];
+    snprintf(q, sizeof(q), "SELECT COUNT(*) FROM agent_goals WHERE status='%s';", status);
+    sqlite3_stmt *st = NULL;
+    int n = -1;
+    if (sqlite3_prepare_v2(agent->db, q, -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int(st, 0);
+        sqlite3_finalize(st);
+    }
+    return n;
+}
+
 int main(int argc, char **argv) {
     load_env_file(".env");
 
@@ -116,6 +131,7 @@ int main(int argc, char **argv) {
     const char *resume_session_id = NULL;
     const char *headless_prompt = NULL;
     bool no_probe = false;
+    bool cycle_mode = false;   /* T0.3: run one autonomic cycle and exit */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -131,7 +147,8 @@ int main(int argc, char **argv) {
             printf("  --no-probe                 Skip gateway pre-flight health & authentication probe\n");
             printf("  --headless <prompt>        Alias for --prompt\n");
             printf("  --eval <prompt>            Alias for --prompt\n");
-            printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n\n");
+            printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n");
+            printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n\n");
             return 0;
         } else if (strcmp(argv[i], "--telegram") == 0 || strcmp(argv[i], "-t") == 0 ||
                    strcmp(argv[i], "--omnichannel") == 0 || strcmp(argv[i], "-o") == 0) {
@@ -152,6 +169,10 @@ int main(int argc, char **argv) {
             headless_prompt = argv[++i];
         } else if (strcmp(argv[i], "--selfest") == 0) {
             return run_selfest();
+        } else if (strcmp(argv[i], "--cycle") == 0) {
+            /* T0.3: clock-triggered autonomy — no chat idleness, no model call. */
+            cycle_mode = true;
+            no_probe = true;
         }
     }
 
@@ -237,6 +258,32 @@ int main(int argc, char **argv) {
     if (!harness) {
         fprintf(stderr, "\033[1;31m[Error] Out of memory: failed to initialize harness.\033[0m\n");
         return 1;
+    }
+
+    if (cycle_mode) {
+        /* T0.3: one autonomic cycle, driven by the clock instead of 30 minutes of
+           chat idleness. Kill-switch aware; exit code is the cycle's own verdict. */
+        if (!almaz_autonomy_enabled()) {
+            printf("[cycle] ALMAZ_AUTONOMY is off — no cycle run.\n");
+            belya_harness_free(harness);
+            model_gateway_free(gateway);
+            return 0;
+        }
+        int before_pending = goal_status_count(agent, "pending");
+        int before_blocked = goal_status_count(agent, "blocked");
+        char *alert = NULL;
+        bool ran = almaz_autonomic_cognition_cycle(harness, &alert);
+        int after_pending = goal_status_count(agent, "pending");
+        int after_blocked = goal_status_count(agent, "blocked");
+        printf("[cycle] ran=%d pending %d->%d blocked %d->%d\n",
+               (int)ran, before_pending, after_pending, before_blocked, after_blocked);
+        if (alert) {
+            printf("[cycle] critical alert: %s\n", alert);
+            free(alert);
+        }
+        belya_harness_free(harness);
+        model_gateway_free(gateway);
+        return ran ? 0 : 1;
     }
 
     if (telegram_mode) {

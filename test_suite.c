@@ -2381,6 +2381,32 @@ static void test_goal_queue_progress(void) {
     printf("  -> Goal Queue Progress PASSED\n");
 }
 
+static void test_autonomy_kill_switch(void) {
+    printf("[Test] Autonomy kill switch (ALMAZ_AUTONOMY)...\n");
+    unsetenv("ALMAZ_AUTONOMY");
+    assert(almaz_autonomy_enabled());          /* unset = enabled */
+
+    setenv("ALMAZ_AUTONOMY", "1", 1);
+    assert(almaz_autonomy_enabled());
+
+    setenv("ALMAZ_AUTONOMY", "off", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "OFF", 1);        /* case-insensitive */
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "0", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "false", 1);
+    assert(!almaz_autonomy_enabled());
+    setenv("ALMAZ_AUTONOMY", "no", 1);
+    assert(!almaz_autonomy_enabled());
+
+    setenv("ALMAZ_AUTONOMY", "yes", 1);
+    assert(almaz_autonomy_enabled());
+
+    unsetenv("ALMAZ_AUTONOMY");
+    printf("  -> Autonomy Kill Switch PASSED\n");
+}
+
 static void test_health_watcher(void) {
     printf("--- Health Watcher ---\n");
 
@@ -4203,6 +4229,7 @@ int main(void) {
     test_knowself_memory_gating();
     test_autonomic_subconscious_and_goals();
     test_goal_queue_progress();
+    test_autonomy_kill_switch();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
@@ -4226,7 +4253,9 @@ int main(void) {
     test_phase6_web_search_notebook_and_lsp();
     test_phase7_omnichannel_and_remote_backends();
     test_gateway_preflight_probe();
-    printf("================ All Tests Passed Successfully (62/62 - 100%%) ================\n\n");
+    /* No hardcoded count: it drifted from reality (the label claimed 62/62 while
+       the suite held a different number). The per-test PASSED lines are the truth. */
+    printf("================ All Tests Passed Successfully ================\n\n");
     return 0;
 }
 

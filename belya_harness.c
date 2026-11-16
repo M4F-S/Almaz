@@ -6634,6 +6634,16 @@ bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary) {
     return true;
 }
 
+bool almaz_autonomy_enabled(void) {
+    const char *v = getenv("ALMAZ_AUTONOMY");
+    if (!v || !v[0]) return true;              /* unset = enabled */
+    if (strcmp(v, "0") == 0) return false;
+    if (strcasecmp(v, "off") == 0) return false;
+    if (strcasecmp(v, "false") == 0) return false;
+    if (strcasecmp(v, "no") == 0) return false;
+    return true;
+}
+
 bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert) {
     if (!harness || !harness->agent) return false;
 

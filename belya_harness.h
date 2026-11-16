@@ -157,6 +157,9 @@ bool almaz_should_retrieve_memory(const char *user_input);
 
 // Autonomic Subconscious Idle Loop & Intrinsic Goal Engine
 bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert);
+/* P0 kill switch (FR-13): ALMAZ_AUTONOMY=off|0|false|no disables every autonomous
+   cycle regardless of who triggers it (timer, idle loop or /cycle). Unset = enabled. */
+bool almaz_autonomy_enabled(void);
 void almaz_goals_generate_deterministic(BelyaHarness *h);
 bool almaz_goals_add(sqlite3 *db, const char *goal, const char *category, int priority, const char *rationale);
 bool almaz_goals_process_next(BelyaHarness *h, char **out_result_summary);
