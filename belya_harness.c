@@ -2189,7 +2189,38 @@ static char *tool_spawn_subagent(BelyaAgent *agent, const JsonValue *args) {
                 }
             }
         }
+        if (resp.prompt_tokens > 16000 && sub_agent->msg_count > 10) {
+            belya_agent_compact_history(sub_agent, 8);
+        }
         model_gateway_response_free(&resp);
+    }
+
+    bool partial = false;
+    if (running && turns <= 0) {
+        partial = true;
+        ModelGatewayResponse wrap = belya_agent_step_forced_text(sub_agent,
+            "Summarize concisely what was completed, what is pending, and which files were changed.");
+        if (wrap.content && strlen(wrap.content) > 0) {
+            if (final_ans.len > 0) dyn_str_free(&final_ans);
+            final_ans = dyn_str_new();
+            size_t wlen = strlen(wrap.content);
+            dyn_str_append_len(&final_ans, wrap.content, wlen > 2000 ? 2000 : wlen);
+        } else if (sub_agent->msg_count > 0) {
+            for (ssize_t m = (ssize_t)sub_agent->msg_count - 1; m >= 0; m--) {
+                if (sub_agent->messages[m].role && strcmp(sub_agent->messages[m].role, "assistant") == 0 &&
+                    sub_agent->messages[m].content && strlen(sub_agent->messages[m].content) > 0) {
+                    if (final_ans.len > 0) dyn_str_free(&final_ans);
+                    final_ans = dyn_str_new();
+                    size_t clen = strlen(sub_agent->messages[m].content);
+                    dyn_str_append_len(&final_ans, sub_agent->messages[m].content, clen > 2000 ? 2000 : clen);
+                    break;
+                }
+            }
+        }
+        if (final_ans.len == 0) {
+            dyn_str_appendf(&final_ans, "stopped: max_turns reached after %zu tool executions", tool_executions);
+        }
+        model_gateway_response_free(&wrap);
     }
 
     belya_harness_free(sub_harness);
@@ -2200,7 +2231,8 @@ static char *tool_spawn_subagent(BelyaAgent *agent, const JsonValue *args) {
     model_gateway_free(sub_gw);
 
     DynString envelope = dyn_str_new();
-    dyn_str_appendf(&envelope, "=== Subagent Task Execution Envelope ===\nTask: %s\nTools Executed: %zu\n\n", task, tool_executions);
+    dyn_str_appendf(&envelope, "=== Subagent Task Execution Envelope ===\nTask: %s\nStatus: %s\nTools Executed: %zu\n\n",
+                    task, partial ? "partial (max_turns reached)" : "done", tool_executions);
     if (tool_log.len > 0) {
         dyn_str_append(&envelope, "Execution Trace:\n");
         dyn_str_append(&envelope, tool_log.data);
