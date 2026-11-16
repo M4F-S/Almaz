@@ -6644,20 +6644,72 @@ bool almaz_autonomy_enabled(void) {
     return true;
 }
 
+AlmazCycleLimits almaz_cycle_limits_from_env(void) {
+    AlmazCycleLimits l = { 5, 120, 5000 };
+    const char *g = getenv("ALMAZ_CYCLE_MAX_GOALS");
+    const char *s = getenv("ALMAZ_CYCLE_MAX_SECONDS");
+    const char *r = getenv("ALMAZ_CYCLE_TOKEN_RESERVE");
+    if (g) { int v = atoi(g); if (v > 0 && v <= 50) l.max_goals = v; }
+    if (s) { int v = atoi(s); if (v > 0 && v <= 3600) l.max_seconds = v; }
+    if (r) { long v = atol(r); if (v >= 0) l.token_reserve = v; }
+    return l;
+}
+
+bool almaz_cycle_budget_ok(BelyaAgent *agent, const AlmazCycleLimits *lim, long *out_remaining) {
+    if (out_remaining) *out_remaining = -1;
+    if (!lim) return false;
+    /* No gateway means no spend path at all. */
+    if (!agent || !agent->gateway) return true;
+    ModelGateway *gw = agent->gateway;
+
+    if (gw->budget_tripped && budget_state_day_is_today(&gw->budget_state)) return false;
+
+    long cap = gw->budget_limits.daily_tokens;   /* 0 = disabled */
+    if (cap <= 0) {
+        if (out_remaining) *out_remaining = -1;
+        return true;
+    }
+    long used = budget_state_day_is_today(&gw->budget_state) ? gw->budget_state.tokens_used : 0;
+    long remaining = cap - used;
+    if (out_remaining) *out_remaining = remaining;
+    return remaining >= lim->token_reserve;
+}
+
 bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_alert) {
     if (!harness || !harness->agent) return false;
 
-    // 1. Deterministically generate pending goals based on current telemetry
-    almaz_goals_generate_deterministic(harness);
-
-    // 2. Drain a bounded batch of pending goals (H7/H10). The queue only drains here,
-    //    so processing a single goal per ~2h cycle left remediations pending for days.
+    // 1. Spend governor first (T0.4): a refused cycle must be a strict no-op, so it
+    //    neither generates bookkeeping goals nor drains the queue. Refusal is a
+    //    normal outcome (exit 0), not a failure.
+    AlmazCycleLimits lim = almaz_cycle_limits_from_env();
+    long remaining_tokens = -1;
+    bool budget_ok = almaz_cycle_budget_ok(harness->agent, &lim, &remaining_tokens);
+    int processed = 0;
     char *goal_summary = NULL;
-    for (int gi = 0; gi < 5; gi++) {
-        char *one = NULL;
-        if (!almaz_goals_process_next(harness, &one)) break;
-        free(goal_summary);
-        goal_summary = one;   /* keep the last summary for the log line below */
+
+    if (!budget_ok) {
+        belya_agent_log_timeline(harness->agent, "cycle_budget_stop",
+                                 "Autonomic cycle skipped: daily budget is sealed or below the cycle token reserve. Nothing was generated or processed.");
+    } else {
+        // 2a. Deterministically generate pending goals based on current telemetry
+        almaz_goals_generate_deterministic(harness);
+    }
+
+    // 2b. Drain a bounded batch: capped by goal count and wall clock.
+    if (budget_ok) {
+        time_t deadline = time(NULL) + (time_t)lim.max_seconds;
+        for (int gi = 0; gi < lim.max_goals; gi++) {
+            if (time(NULL) > deadline) {
+                belya_agent_log_timeline(harness->agent, "cycle_time_stop",
+                                         "Autonomic cycle hit its wall-clock cap; remaining goals stay pending.");
+                break;
+            }
+            char *one = NULL;
+            if (!almaz_goals_process_next(harness, &one)) break;
+            processed++;
+            free(goal_summary);
+            goal_summary = one;   /* keep the last summary for the log line below */
+        }
     }
 
     // 3. Sync self-model
@@ -6665,10 +6717,18 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
 
     // 4. Log autonomic cycle to timeline
     char log_buf[512];
-    snprintf(log_buf, sizeof(log_buf),
-             "Autonomic subconscious cycle executed: %s (Turn: %zu, RSS: %.2fMB)",
-             goal_summary ? goal_summary : "nominally complete",
-             harness->agent->turn_count, belya_get_current_rss_mb());
+    if (!budget_ok) {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Autonomic cycle skipped by spend governor (daily cap %ld, remaining %ld, reserve %ld; Turn: %zu, RSS: %.2fMB)",
+                 (harness->agent->gateway ? harness->agent->gateway->budget_limits.daily_tokens : 0L),
+                 remaining_tokens, lim.token_reserve,
+                 harness->agent->turn_count, belya_get_current_rss_mb());
+    } else {
+        snprintf(log_buf, sizeof(log_buf),
+                 "Autonomic cycle: %d goal(s) processed — %.200s (Turn: %zu, RSS: %.2fMB)",
+                 processed, goal_summary ? goal_summary : "no pending goals",
+                 harness->agent->turn_count, belya_get_current_rss_mb());
+    }
     belya_agent_log_timeline(harness->agent, "autonomic_cycle", log_buf);
     free(goal_summary);   /* the dispatcher hands ownership of the summary to the caller */
     goal_summary = NULL;
