@@ -1,5 +1,6 @@
 #include "belya_harness.h"
 #include "research_inbox.h"
+#include "build_info.h"
 #include "telegram_adapter.h"
 #include "minifrontmatter.h"
 #include <sqlite3.h>
@@ -320,7 +321,10 @@ int main(int argc, char **argv) {
     bool probe_only = false;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0) {
+            printf("%s\n", almaz_version_string());
+            return 0;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: almaz [OPTIONS]\n\n");
             printf("Options:\n");
             printf("  -h, --help                 Show this help message\n");
@@ -340,6 +344,7 @@ int main(int argc, char **argv) {
             printf("  --export-skills            Export RFC 8615 skills discovery catalogue to .well-known/agent-skills/ and exit\n");
             printf("  --export-sharegpt <file>   Export trajectory in ShareGPT / Hermes format and exit\n");
             printf("  --export-dpo <file>        Export trajectory in Hermes DPO preference format and exit\n");
+            printf("  --version                  Print build provenance (git SHA + build date) and exit\n");
             printf("  --selfest                  Run startup self-test (DB integrity, tables, self_model) and exit\n");
             printf("  --cycle                    Run ONE autonomic cognition cycle (goal drain + self-model) and exit\n");
             printf("  --digest                   Print the daily autonomy scorecard, record it, and send it\n");
