@@ -555,7 +555,7 @@ int main(int argc, char **argv) {
         /* P2: findings are data. Nothing here executes fetched text or calls a model;
            a suspicious item is stored, flagged, and logged as a security event. */
         int n_feeds = 0;
-        const char *const *feeds = research_default_feeds(&n_feeds);
+        const char *const *feeds = research_feeds(&n_feeds);
         ResearchRunStats rs = research_run(agent, feeds, n_feeds);
         printf("[research] feeds %d/%d | items %d stored %d | flagged %d | proposals %d\n",
                rs.feeds_ok, rs.feeds_ok + rs.feeds_failed, rs.items_parsed,
