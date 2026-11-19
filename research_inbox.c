@@ -484,3 +484,44 @@ const char *const *research_default_feeds(int *count_out) {
     if (count_out) *count_out = (int)(sizeof(feeds) / sizeof(feeds[0]));
     return feeds;
 }
+
+/* ALMAZ_RESEARCH_FEEDS — comma-separated source list, parsed once.
+ * http/https only: the same rule research_fetch enforces, applied earlier so a
+ * malformed entry is dropped at the source list instead of failing every run. */
+const char *const *research_feeds(int *count_out) {
+    static char *env_feeds[RESEARCH_MAX_FEEDS];
+    static int env_count = 0;
+    static char *env_seen = NULL;   /* re-parse whenever the variable changes */
+
+    const char *env = getenv("ALMAZ_RESEARCH_FEEDS");
+    const char *want = (env && *env) ? env : "";
+    if (!env_seen || strcmp(env_seen, want) != 0) {
+        for (int i = 0; i < env_count; i++) { free(env_feeds[i]); env_feeds[i] = NULL; }
+        env_count = 0;
+        free(env_seen);
+        env_seen = strdup(want);
+        if (want[0]) {
+            char *dup = strdup(want);
+            if (dup) {
+                char *save = NULL;
+                for (char *tok = strtok_r(dup, ",", &save);
+                     tok && env_count < RESEARCH_MAX_FEEDS;
+                     tok = strtok_r(NULL, ",", &save)) {
+                    while (*tok == ' ') tok++;
+                    size_t len = strlen(tok);
+                    while (len > 0 && (tok[len - 1] == ' ' || tok[len - 1] == '\n')) tok[--len] = '\0';
+                    if (len == 0) continue;
+                    if (strncmp(tok, "http://", 7) != 0 && strncmp(tok, "https://", 8) != 0) continue;
+                    env_feeds[env_count] = strdup(tok);
+                    if (env_feeds[env_count]) env_count++;
+                }
+                free(dup);
+            }
+        }
+    }
+    if (env_count > 0) {
+        if (count_out) *count_out = env_count;
+        return (const char *const *)env_feeds;
+    }
+    return research_default_feeds(count_out);
+}

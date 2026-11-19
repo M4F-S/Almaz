@@ -85,4 +85,10 @@ ResearchRunStats research_run(BelyaAgent *agent, const char *const *feeds, int n
 /* Bounded default source list: one arXiv category, two dependency release feeds. */
 const char *const *research_default_feeds(int *count_out);
 
+/* Source list actually used: ALMAZ_RESEARCH_FEEDS (comma-separated, http/https
+ * only) when set, otherwise the defaults. Exists so the ingestion path can be
+ * exercised end-to-end against a local feed — without it the injection defence
+ * is only testable in pieces, never through the fetch. */
+const char *const *research_feeds(int *count_out);
+
 #endif /* RESEARCH_INBOX_H */
