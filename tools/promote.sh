@@ -63,9 +63,28 @@ case "$LKG" in *[!A-Za-z0-9._-]*|"") fail "LKG slot name invalid: $LKG";; esac
 [ -x "./$ACTIVE" ] || fail "active slot missing: $ACTIVE"
 [ -x "./$LKG" ] || fail "LKG slot missing: $LKG"
 
+_hash() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+
+# No-op promotion: a candidate byte-identical to ACTIVE changes nothing, yet the run
+# would report SUCCESS and bump DEPLOY_SEQ — a green signal that proves nothing.
+if [ "$(_hash "$CAND")" = "$(_hash "./$ACTIVE")" ]; then
+  echo "[promote] REFUSING: candidate is byte-identical to ACTIVE ($ACTIVE) — nothing to promote" >&2
+  exit 2
+fi
+
 # H12: slots must be distinct by CONTENT, not just by name. A rollback target that is
 # byte-identical to STAGING (or to ACTIVE) cannot roll anything back.
-_hash() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+
+# Provenance is written the moment the swap happens, not minutes later: a metadata file
+# that lags the binary describes the previous deployment while the new one serves.
+META_TOOL="${META_TOOL:-/usr/local/libexec/almaz/deploy_meta.sh}"
+write_meta() {
+  if [ -x "$META_TOOL" ]; then
+    "$META_TOOL" "$CDIR" >/dev/null 2>&1 || echo "[promote] WARN: deploy_meta failed (provenance stale)" >&2
+  else
+    echo "[promote] WARN: $META_TOOL missing; provenance not refreshed" >&2
+  fi
+}
 [ "$(_hash "./$ACTIVE")" != "$(_hash "./$LKG")" ] || fail "ACTIVE and LKG are byte-identical ($ACTIVE == $LKG by hash) — rollback would be a no-op"
 [ "$(_hash "./$LKG")" != "$(_hash "./$STAGING")" ] || fail "LKG and STAGING are byte-identical ($LKG == $STAGING by hash) — seed a distinct LKG (e.g. almaz.lkg)"
 
@@ -91,9 +110,11 @@ unlock_slot "./$ACTIVE"
 cp -a "./$ACTIVE" ".$ACTIVE.rollback"
 cp -a "./$STAGING" "./.almaz.new"
 mv -f "./.almaz.new" "./$ACTIVE"
+write_meta   # ACTIVE slot now holds the candidate
 
 if ! systemctl restart almaz 2>/dev/null; then
   cp -a ".$ACTIVE.rollback" "./.almaz.new" && mv -f "./.almaz.new" "./$ACTIVE"
+  write_meta
   fail "service restart failed; rolled back ACTIVE slot from .rollback"
 fi
 
@@ -102,6 +123,7 @@ sleep 90
 if ! systemctl is-active --quiet almaz 2>/dev/null; then
   rollback_to ".$ACTIVE.rollback"
   systemctl restart almaz 2>/dev/null || true
+  write_meta
   fail "witness failed (service inactive); rolled back to previous ACTIVE"
 fi
 
@@ -110,12 +132,14 @@ fi
 if ! journalctl -u almaz --no-pager --since "120 seconds ago" 2>/dev/null | grep -q "Almaz Sovereign Telegram Bot Daemon Online"; then
   rollback_to ".$ACTIVE.rollback"
   systemctl restart almaz 2>/dev/null || true
+  write_meta
   fail "witness failed (daemon did not report Online); rolled back to previous ACTIVE"
 fi
 
 grep -q "Crash-loop detected" <(journalctl -u almaz --no-pager --since "2 minutes ago" 2>/dev/null) && {
   rollback_to "./$LKG"
   systemctl restart almaz 2>/dev/null || true
+  write_meta
   fail "crash-loop detected during witness; rolled back to LKG=$LKG"
 }
 
@@ -125,6 +149,7 @@ unlock_slot "./$LKG"
 cp -a ".$ACTIVE.rollback" "./.almaz.lkg.new" && mv -f "./.almaz.lkg.new" "./$LKG"
 echo "[promote] LKG rotated: previous ACTIVE -> $LKG"
 
+write_meta   # after LKG rotation: LKG_SHA must describe the new rollback target
 echo "[promote] SUCCESS: $STAGING promoted to ACTIVE ($ACTIVE). LKG untouched: $LKG"
 notify "✅ *[Almaz Deploy]* Candidate promoted to ACTIVE (selfest PASS + 90s witness OK). LKG=$(basename "$LKG")"
 sqlite3 almaz_memory.sqlite "INSERT INTO agent_timeline (event_type, summary) VALUES ('self_deploy', 'promoted $STAGING to ACTIVE ($ACTIVE); witness OK');" 2>/dev/null || true

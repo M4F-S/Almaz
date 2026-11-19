@@ -1,5 +1,6 @@
 #include "belya_harness.h"
 #include "research_inbox.h"
+#include "build_info.h"
 #include "telegram_adapter.h"
 #include "belya_channel.h"
 #include "minifrontmatter.h"
@@ -5189,6 +5190,24 @@ static void test_research_injection_end_to_end(void) {
     printf("  -> fetched 1, stored 1, flagged 1, injection event 1, tool events 0 PASSED\n");
 }
 
+
+/* Provenance must travel inside the binary: a sidecar file describes intent, the
+ * compiled SHA describes what is running. */
+static void test_version_reports_build(void) {
+    printf("[Test] Build provenance: version string carries the compiled SHA...\n");
+    const char *v = almaz_version_string();
+    assert(v != NULL);
+    assert(strncmp(v, "almaz ", 6) == 0);
+    assert(strstr(v, almaz_build_sha()) != NULL);
+    assert(strlen(almaz_build_date()) == 10);      /* YYYY-MM-DD */
+    /* A build made from a git tree must know its commit. A tarball build may not. */
+    if (access(".git", F_OK) == 0) {
+        assert(strcmp(almaz_build_sha(), "unknown") != 0);
+        assert(strlen(almaz_build_sha()) >= 7);
+    }
+    printf("  -> %s PASSED\n", v);
+}
+
 int main(void) {
     printf("\n================ Running Almaz Super Strict Test Suite ================\n");
     test_dyn_string();
@@ -5239,6 +5258,7 @@ int main(void) {
     test_research_injection_resistance();
     test_research_gap_mapping();
     test_research_injection_end_to_end();
+    test_version_reports_build();
     test_health_watcher();
     test_budget_controller();
     test_timeline_anomaly();
