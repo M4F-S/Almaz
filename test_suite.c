@@ -5203,6 +5203,8 @@ static void test_research_injection_end_to_end(void) {
     /* the decisive assertion: nothing executed, no model consulted */
     assert(test_count_rows(agent, "SELECT COUNT(*) FROM agent_timeline WHERE event_type LIKE 'tool%';") == 0);
     printf("  -> fetched 1, stored 1, flagged 1, injection event 1, tool events 0 PASSED\n");
+    belya_agent_free(agent);
+    model_gateway_free(gw);
 }
 
 

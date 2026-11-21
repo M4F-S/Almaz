@@ -3254,7 +3254,11 @@ char *belya_dispatch_worker_speculative(BelyaHarness *router_harness, const char
         SpeculativeCandidate *c = &cands[i];
         c->index = i;
         snprintf(c->task_id, sizeof(c->task_id), "wtask_%ld_%d_c%d", base_time, (int)(rand() % 1000), i);
-        snprintf(c->wt_path, sizeof(c->wt_path), "/tmp/belya_worker_%s", c->task_id);
+        {
+            char task_id_copy[sizeof(c->task_id)];
+            snprintf(task_id_copy, sizeof(task_id_copy), "%s", c->task_id);
+            snprintf(c->wt_path, sizeof(c->wt_path), "/tmp/belya_worker_%s", task_id_copy);
+        }
 
         int rc_prune = system("git worktree prune >/dev/null 2>&1");
         (void)rc_prune;
@@ -8799,7 +8803,10 @@ bool almaz_autonomic_cognition_cycle(BelyaHarness *harness, char **out_critical_
                 break;
             }
             char *one = NULL;
-            if (!almaz_goals_process_next(harness, &one)) break;
+            if (!almaz_goals_process_next(harness, &one)) {
+                free(one);
+                break;
+            }
             processed++;
             free(goal_summary);
             goal_summary = one;   /* keep the last summary for the log line below */

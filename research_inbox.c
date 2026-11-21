@@ -250,7 +250,7 @@ int research_store_items(BelyaAgent *agent, const ResearchItem *items, int n, in
         sqlite3_free(sql);
 
         if (items[i].suspicious) {
-            char msg[320];
+            char msg[768];
             snprintf(msg, sizeof(msg), "%s from %s matched '%s'",
                      items[i].url, items[i].source, items[i].injection_pattern);
             belya_agent_log_timeline(agent, "research_injection_attempt", msg);

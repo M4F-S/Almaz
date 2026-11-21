@@ -60,7 +60,7 @@ $(TEST_TARGET): $(TEST_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(TEST_SRCS) $(LIBS)
 
 test_asan: $(TEST_SRCS)
-	$(CC) -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 -g -fsanitize=address,undefined -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -o almaz_test_asan $(TEST_SRCS) $(LIBS)
+	$(CC) $(PROVENANCE) -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 -g -fsanitize=address,undefined -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -o almaz_test_asan $(TEST_SRCS) $(LIBS)
 	./almaz_test_asan
 
 test-asan: test_asan
@@ -72,7 +72,7 @@ $(CRUCIBLE_TARGET): $(CRUCIBLE_SRCS)
 	$(CC) $(CFLAGS) -o $@ $(CRUCIBLE_SRCS) $(LIBS)
 
 test-crucible-asan: $(CRUCIBLE_SRCS)
-	$(CC) -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 -g -fsanitize=address,undefined -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -o almaz_crucible_asan $(CRUCIBLE_SRCS) $(LIBS)
+	$(CC) $(PROVENANCE) -Wall -Wextra -Werror -Wpedantic -Wshadow -Wformat=2 -g -fsanitize=address,undefined -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -o almaz_crucible_asan $(CRUCIBLE_SRCS) $(LIBS)
 	./almaz_crucible_asan
 
 holdout: $(HOLDOUT_TARGET)
