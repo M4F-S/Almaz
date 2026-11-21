@@ -521,6 +521,7 @@ int main(int argc, char **argv) {
     if (stage_mode) {
         harness->stage_mode = true;
     }
+    belya_harness_load_mcp_config(harness, "mcp_servers.json");
 
     if (digest_mode) {
         /* T0.5: the scorecard is a report, never a decision — so it is recorded and
