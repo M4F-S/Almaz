@@ -24,6 +24,7 @@ typedef struct {
     time_t last_alert_time;
     int disk_alerted;
     int sqlite_alerted;
+    int sqlite_healthy_streak;
     int mem_alerted;
     int gw_alerted;
     int tg_alerted;
