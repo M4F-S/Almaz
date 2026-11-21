@@ -84,6 +84,21 @@ void test_minijson(void) {
     free(serialized);
 
     json_free(root);
+
+    // Test UTF-16 surrogate pair parsing and round-trip (e.g. \uD83D\uDEA8 -> 🚨)
+    JsonValue *surrogate_root = json_parse("{\"alert\": \"\\uD83D\\uDEA8 critical test\"}");
+    assert(surrogate_root != NULL);
+    assert(strcmp(json_obj_get_str(surrogate_root, "alert"), "🚨 critical test") == 0);
+    char *emoji_ser = json_serialize(surrogate_root);
+    assert(emoji_ser != NULL);
+    assert(strstr(emoji_ser, "🚨 critical test") != NULL);
+    JsonValue *reparsed = json_parse(emoji_ser);
+    assert(reparsed != NULL);
+    assert(strcmp(json_obj_get_str(reparsed, "alert"), "🚨 critical test") == 0);
+    free(emoji_ser);
+    json_free(reparsed);
+    json_free(surrogate_root);
+
     printf("  -> MiniJSON PASSED\n");
 }
 

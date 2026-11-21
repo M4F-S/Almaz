@@ -189,7 +189,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, summary);
             char alert[512];
             snprintf(alert, sizeof(alert),
-                     "🩺 *[Almaz Self-Heal]* Disk pressure: %d%% free. Timeline pruned + WAL checkpointed.", free_pct);
+                     "[WARN] [Almaz Self-Heal] Disk pressure: %d%% free. Timeline pruned + WAL checkpointed.", free_pct);
             send_alert(hw, bot, alert);
             hw->disk_alerted = 1;
             enqueue_health_goal(agent, "disk pressure low free space");
@@ -214,7 +214,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, summary);
             char alert[512];
             snprintf(alert, sizeof(alert),
-                     "🩺 *[Almaz Self-Heal]* Memory pressure: RSS %.0f MB. Timeline pruned + WAL checkpointed.",
+                     "[WARN] [Almaz Self-Heal] Memory pressure: RSS %.0f MB. Timeline pruned + WAL checkpointed.",
                      (double)(rss_kb / 1024));
             send_alert(hw, bot, alert);
             hw->mem_alerted = 1;
@@ -279,7 +279,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                 log_timeline(agent, summary);
                 char alert[640];
                 snprintf(alert, sizeof(alert),
-                         "🚨 *[Almaz Self-Heal]* SQLite integrity check failed. Backup attempted to `/opt/almaz/recovery/almaz_db_recovery.db`. "
+                         "[CRITICAL] [Almaz Self-Heal] SQLite integrity check failed. Backup attempted to /opt/almaz/recovery/almaz_db_recovery.db. "
                          "Operator may need to restore memory DB from backup.");
                 send_alert(hw, bot, alert);
                 hw->sqlite_alerted = 1;
@@ -305,7 +305,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, summary);
             char alert[512];
             snprintf(alert, sizeof(alert),
-                     "🚨 *[Almaz Self-Heal]* LLM gateway degraded: %d consecutive failures. Check `%s`.",
+                     "[CRITICAL] [Almaz Self-Heal] LLM gateway degraded: %d consecutive failures. Check %s.",
                      gateway->consecutive_failures, gateway->endpoint ? gateway->endpoint : "endpoint");
             send_alert(hw, bot, alert);
             hw->gw_alerted = 1;
@@ -327,7 +327,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, summary);
             char alert[512];
             snprintf(alert, sizeof(alert),
-                     "🚨 *[Almaz Self-Heal]* Telegram long-poll degraded: %d consecutive getUpdates failures.",
+                     "[CRITICAL] [Almaz Self-Heal] Telegram long-poll degraded: %d consecutive getUpdates failures.",
                      bot->consecutive_poll_failures);
             send_alert(hw, bot, alert);
             hw->tg_alerted = 1;
@@ -349,7 +349,7 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
             log_timeline(agent, summary);
             char alert[512];
             snprintf(alert, sizeof(alert),
-                     "⛔ *[Almaz Budget Breaker]* Daily budget sealed: %ld tokens, %ld calls. "
+                     "[ALERT] [Almaz Budget Breaker] Daily budget sealed: %ld tokens, %ld calls. "
                      "LLM calls paused until UTC midnight.", gateway->budget_state.tokens_used, gateway->budget_state.calls);
             send_alert(hw, bot, alert);
             hw->budget_alerted = 1;
