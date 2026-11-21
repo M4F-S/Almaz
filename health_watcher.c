@@ -142,6 +142,13 @@ static bool checkpoint_wal(sqlite3 *db) {
     return sqlite3_wal_checkpoint_v2(db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL) == SQLITE_OK;
 }
 
+static void rebuild_fts_indexes(sqlite3 *db) {
+    if (!db) return;
+    sqlite3_exec(db, "INSERT INTO agent_manifests_fts(agent_manifests_fts) VALUES('rebuild');", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO agent_memory_fts(agent_memory_fts) VALUES('rebuild');", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO atomic_facts_fts(atomic_facts_fts) VALUES('rebuild');", NULL, NULL, NULL);
+}
+
 static void log_timeline(BelyaAgent *agent, const char *summary) {
     if (!agent) return;
     belya_agent_log_timeline(agent, "health_watcher", summary);
@@ -253,6 +260,27 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
         int qc = sqlite_quick_check_state(agent->db, qc_err, sizeof(qc_err));
         int qc_initial = qc;
         int ic_verdict = -2;
+
+        /* FTS5 inverted index drift is a derived virtual table issue, NOT B-tree corruption.
+           Automatically rebuild FTS5 derived indexes and re-verify without raising false alarms. */
+        if (qc != 1 && (strstr(qc_err, "FTS") || strstr(qc_err, "fts") ||
+                        strstr(qc_err, "inverted index") || strstr(qc_err, "malformed"))) {
+            rebuild_fts_indexes(agent->db);
+            checkpoint_wal(agent->db);
+            qc_err[0] = '\0';
+            qc = sqlite_quick_check_state(agent->db, qc_err, sizeof(qc_err));
+            if (qc == 1) {
+                log_timeline(agent, "sqlite FTS5 derived index rebuilt automatically -> quick_check clean (ok)");
+                if (hw->sqlite_alerted) {
+                    hw->sqlite_healthy_streak++;
+                    if (hw->sqlite_healthy_streak >= 3) {
+                        hw->sqlite_alerted = 0;
+                        log_timeline(agent, "sqlite integrity recovered and stable");
+                    }
+                }
+            }
+        }
+
         if (qc != 1) {
             /* Passive checkpoint to rule out uncheckpointed WAL frames from concurrent writers */
             checkpoint_wal(agent->db);
@@ -288,9 +316,15 @@ void health_watcher_run(HealthWatcher *hw, BelyaAgent *agent, ModelGateway *gate
                 bool vacuum_clean = false;
                 if (vrc == SQLITE_OK) {
                     sqlite3 *rec_db = NULL;
-                    if (sqlite3_open_v2("/opt/almaz/recovery/almaz_db_recovery.db", &rec_db, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK) {
+                    if (sqlite3_open_v2("/opt/almaz/recovery/almaz_db_recovery.db", &rec_db, SQLITE_OPEN_READWRITE, NULL) == SQLITE_OK) {
                         char rec_err[128] = {0};
-                        if (sqlite_quick_check_state(rec_db, rec_err, sizeof(rec_err)) == 1) {
+                        int rqc = sqlite_quick_check_state(rec_db, rec_err, sizeof(rec_err));
+                        if (rqc != 1 && (strstr(rec_err, "FTS") || strstr(rec_err, "fts") || strstr(rec_err, "inverted index") || strstr(rec_err, "malformed"))) {
+                            rebuild_fts_indexes(rec_db);
+                            rec_err[0] = '\0';
+                            rqc = sqlite_quick_check_state(rec_db, rec_err, sizeof(rec_err));
+                        }
+                        if (rqc == 1) {
                             vacuum_clean = true;
                         }
                         sqlite3_close(rec_db);
