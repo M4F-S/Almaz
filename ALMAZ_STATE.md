@@ -10,7 +10,7 @@
 
 **Repository:** `M4F-S/Almaz`  
 **Current Version:** `v2.1.0-phase7` (Competitive Parity & Late-2026 Sovereign Organism)  
-**Host Environment:** Remote VPS Ubuntu 24.04, Linux x86-64 (`187.124.2.26`) — the repo also builds on macOS (Darwin ARM64) dev hosts; **this deployment is Linux**  
+**Host Environment:** Remote VPS Ubuntu 24.04, Linux x86-64 (`<production-vps-ip>`) — the repo also builds on macOS (Darwin ARM64) dev hosts; **this deployment is Linux**  
 **Deployment Daemon:** `/opt/almaz/almaz` under `almaz.service` (supervised by `almaz-watchdog`)  
 **Active Inference Engine:** `deepseek-v4.1-flash` via OpenCode Go Flat-Rate Gateway  
 **Memory Architecture:** SQLite 3 with FTS5, Gomaa Scoped Wings, FadeMem biological decay, CORAL dual-stream routing, and WAL Mode (`almaz_memory.sqlite`)  
@@ -81,7 +81,7 @@ Almaz seamlessly incorporates all 41 native tools and capabilities from the Comp
 
 ## 🚀 3. Production Deployment Status
 
-- **VPS Host:** `187.124.2.26` (Ubuntu 24.04 LTS, root access).
+- **VPS Host:** `<production-vps-ip>` (Ubuntu 24.04 LTS, root access).
 - **Service Name:** `almaz.service` (`systemd`).
 - **Supervision:** `almaz-watchdog` process supervisor.
 - **Daily Timer:** `/etc/systemd/system/almaz-daily.timer` (03:00 UTC Darwinian evolution cycle).

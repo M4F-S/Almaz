@@ -72,3 +72,7 @@ HARDENING_PLAN_*.md
 recovery/
 # H16b: transient backup written by the rules fixture
 .agentrules.testbak
+
+# Dynamic auto-skills & candidates
+skills/auto_*
+almaz.candidate
