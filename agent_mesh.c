@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <grp.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -267,7 +268,18 @@ bool agent_mesh_start(AgentMesh *mesh) {
         close(srv_fd);
         return false;
     }
-    chmod(mesh->socket_path, 0666);
+    /* 0666 let any local account inject frames into the mesh; this daemon runs
+       as root, so that was a direct path into the privileged process. The owner
+       keeps rw and the peer agent (user "belya") reaches it through its group.
+       If the group cannot be applied, fall back to owner-only, never open. */
+    {
+        struct group *peer_grp = getgrnam("belya");
+        if (peer_grp && chown(mesh->socket_path, (uid_t)-1, peer_grp->gr_gid) == 0) {
+            chmod(mesh->socket_path, 0660);
+        } else {
+            chmod(mesh->socket_path, 0600);
+        }
+    }
 
     if (listen(srv_fd, 16) != 0) {
         close(srv_fd);
